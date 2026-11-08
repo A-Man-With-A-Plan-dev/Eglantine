@@ -46,15 +46,11 @@ constexpr u32 MacroRegistersStart = 0xE00;
 // EDEN_NX2_3D_METHODS: log the first write to each 3D register (finds methods Eden doesn't model).
 static const bool g_trace_first_method_writes = std::getenv("EDEN_NX2_3D_METHODS") != nullptr;
 
-// EDEN_NX2_SUPER_MACRO: default ON, 0 disables Super-Macro & Macro DMA Fast-Path.
+// EDEN_NX2_SUPER_MACRO: opt-in (1 enables the 64-byte macro DMA micro-cache).
 static bool SuperMacroEnabled() {
     static const bool enabled = [] {
         const char* env = std::getenv("EDEN_NX2_SUPER_MACRO");
-        if (env == nullptr) {
-            return true;
-        }
-        return std::strcmp(env, "0") != 0 && std::strcmp(env, "off") != 0 &&
-               std::strcmp(env, "false") != 0;
+        return env != nullptr && env[0] == '1';
     }();
     return enabled;
 }
@@ -371,9 +367,6 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
     // c[0][0x644]) right after the loop, before the macro returns.
     if (draw_manager.HasDeferredDraw() && !DrawManager::IsInstanceLoopMethod(method)) [[unlikely]] {
         draw_manager.DrawDeferred(*this, true);
-    }
-    if (SuperMacroEnabled() && !execution_mask[method] && regs.reg_array[method] == argument) {
-        return;
     }
     regs.reg_array[method] = argument;
     for (auto const& table : dirty.tables)
@@ -2620,16 +2613,6 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
             }
             if (address == cb_offset || (address >= cb_data && address < cb_data + 16)) {
                 cb_pos_touched = true;
-            }
-            if (SuperMacroEnabled()) {
-                const bool is_cb_meta = (address == cb_size || address == cb_high || address == cb_low);
-                if ((!is_cb_meta || !cb_pos_touched) && same_value(address, value)) {
-                    if (profile) [[unlikely]] {
-                        Profile::Add(Profile::Counter::MethodWrites, 1);
-                        Profile::Add(Profile::Counter::SameValueWrites, 1);
-                    }
-                    return true;
-                }
             }
             if (!options.batch || !same_value(address, value)) {
                 FrontWrite(split, fs, address, value, true, true);

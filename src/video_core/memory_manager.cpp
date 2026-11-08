@@ -396,7 +396,11 @@ const u8* MemoryManager::GetPointer(GPUVAddr gpu_addr) const {
         return {};
     }
     VideoCommon::Nx2Cow::SetSite(NX2_RETURN_ADDRESS());
-    return memory.GetPointer<u8>(*address);
+    const u8* const ptr = memory.GetPointer<u8>(*address);
+    if (ptr != nullptr && VideoCommon::Nx2Snap::OverlayActive()) [[unlikely]] {
+        return VideoCommon::Nx2Snap::OverlayPointer(*address, ptr);
+    }
+    return ptr;
 }
 
 #if defined(_MSC_VER) && !defined(__clang__) // no need for gcc / clang but msvc's compiler is more conservative with inlining.
@@ -490,7 +494,11 @@ void MemoryManager::ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std:
         VideoCommon::Nx2Cow::SkipNextPointer();
         if (const u8* physical = memory.GetPointer<u8>(dev_addr_base)) [[likely]] {
             VideoCommon::Nx2Ledger::Note(dev_addr_base, copy_amount);
-            std::memcpy(dest_buffer, physical, copy_amount);
+            if (!VideoCommon::Nx2Snap::OverlayActive() ||
+                !VideoCommon::Nx2Snap::TryReadOverlay(dev_addr_base, physical, dest_buffer,
+                                                      copy_amount)) [[likely]] {
+                std::memcpy(dest_buffer, physical, copy_amount);
+            }
         } else {
             std::memset(dest_buffer, 0, copy_amount);
         }
@@ -510,7 +518,11 @@ void MemoryManager::ReadBlockImpl(GPUVAddr gpu_src_addr, void* dest_buffer, std:
         u8* const physical = continuous ? memory.GetPointer<u8>(dev_addr_base) : nullptr;
         if (physical != nullptr) [[likely]] {
             VideoCommon::Nx2Ledger::Note(dev_addr_base, copy_amount);
-            std::memcpy(dest_buffer, physical, copy_amount);
+            if (!VideoCommon::Nx2Snap::OverlayActive() ||
+                !VideoCommon::Nx2Snap::TryReadOverlay(dev_addr_base, physical, dest_buffer,
+                                                      copy_amount)) [[likely]] {
+                std::memcpy(dest_buffer, physical, copy_amount);
+            }
         } else {
             memory.ReadBlockUnsafe(dev_addr_base, dest_buffer, copy_amount);
         }

@@ -5170,7 +5170,7 @@ public:
             }
         }
         const u32 union_pages = t.used_count;
-        if (probe) {
+        if (probe || OverlayOn()) {
             for (size_t i = 0; i < arm_count; ++i) {
                 t.Insert((*arm)[i], FromArmSet);
             }

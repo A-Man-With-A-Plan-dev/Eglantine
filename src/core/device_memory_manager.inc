@@ -457,7 +457,14 @@ u8* DeviceMemoryManager<Traits>::GetSpan(const DAddr src_addr, const std::size_t
     if ((static_cast<size_t>(tracked_entries[page_index].continuity_tracker+1) << page_bits) >= size + subbits) {
         VideoCommon::Nx2Ledger::Note(src_addr, size, VideoCommon::Nx2Ledger::NoteKind::Span);
         VideoCommon::Nx2Cow::SkipNextPointer();
-        return GetPointer<u8>(src_addr);
+        u8* const ptr = GetPointer<u8>(src_addr);
+        if (ptr != nullptr && VideoCommon::Nx2Snap::OverlayActive()) [[unlikely]] {
+            if (size + subbits <= page_size) {
+                return const_cast<u8*>(VideoCommon::Nx2Snap::OverlayPointer(src_addr, ptr));
+            }
+            return nullptr;
+        }
+        return ptr;
     }
     return nullptr;
 }
@@ -469,7 +476,14 @@ const u8* DeviceMemoryManager<Traits>::GetSpan(const DAddr src_addr, const std::
     if ((static_cast<size_t>(tracked_entries[page_index].continuity_tracker+1) << page_bits) >= size + subbits) {
         VideoCommon::Nx2Ledger::Note(src_addr, size, VideoCommon::Nx2Ledger::NoteKind::Span);
         VideoCommon::Nx2Cow::SkipNextPointer();
-        return GetPointer<u8>(src_addr);
+        const u8* const ptr = GetPointer<u8>(src_addr);
+        if (ptr != nullptr && VideoCommon::Nx2Snap::OverlayActive()) [[unlikely]] {
+            if (size + subbits <= page_size) {
+                return VideoCommon::Nx2Snap::OverlayPointer(src_addr, ptr);
+            }
+            return nullptr;
+        }
+        return ptr;
     }
     return nullptr;
 }
@@ -584,7 +598,11 @@ void DeviceMemoryManager<Traits>::ReadBlock(DAddr address, void* dest_pointer, s
         TranslationCache& cache = Translations();
         for (const TranslationEntry& entry : cache.slots) {
             if (entry.guest_page == guest_page && entry.host_ptr != nullptr) {
-                std::memcpy(dest_pointer, entry.host_ptr + page_offset, size);
+                const u8* const src = entry.host_ptr + page_offset;
+                if (!VideoCommon::Nx2Snap::OverlayActive() ||
+                    !VideoCommon::Nx2Snap::TryReadOverlay(address, src, dest_pointer, size)) [[likely]] {
+                    std::memcpy(dest_pointer, src, size);
+                }
                 return;
             }
         }
@@ -595,10 +613,15 @@ void DeviceMemoryManager<Traits>::ReadBlock(DAddr address, void* dest_pointer, s
             auto* const mem_ptr = GetPointerFromRaw<u8>((PAddr(phys_addr - 1) << Memory::YUZU_PAGEBITS));
             cache.slots[cache.cursor] = TranslationEntry{.guest_page = guest_page, .host_ptr = mem_ptr};
             cache.cursor = (cache.cursor + 1) & 3U;
-            std::memcpy(dest_pointer, mem_ptr + page_offset, size);
+            const u8* const src = mem_ptr + page_offset;
+            if (!VideoCommon::Nx2Snap::OverlayActive() ||
+                !VideoCommon::Nx2Snap::TryReadOverlay(address, src, dest_pointer, size)) [[likely]] {
+                std::memcpy(dest_pointer, src, size);
+            }
             return;
         }
     }
+    DAddr current_addr = address;
     WalkBlock(
         address, size,
         [&](size_t copy_amount, DAddr current_vaddr) {
@@ -612,10 +635,15 @@ void DeviceMemoryManager<Traits>::ReadBlock(DAddr address, void* dest_pointer, s
             std::memset(dest_pointer, 0, copy_amount);
         },
         [&](size_t copy_amount, const u8* const src_ptr) {
-            std::memcpy(dest_pointer, src_ptr, copy_amount);
+            if (!VideoCommon::Nx2Snap::OverlayActive() ||
+                !VideoCommon::Nx2Snap::TryReadOverlay(current_addr, src_ptr, dest_pointer,
+                                                      copy_amount)) [[likely]] {
+                std::memcpy(dest_pointer, src_ptr, copy_amount);
+            }
         },
         [&](const std::size_t copy_amount) {
             dest_pointer = static_cast<u8*>(dest_pointer) + copy_amount;
+            current_addr += copy_amount;
         });
 }
 
@@ -651,7 +679,11 @@ void DeviceMemoryManager<Traits>::ReadBlockUnsafe(DAddr address, void* dest_poin
         TranslationCache& cache = Translations();
         for (const TranslationEntry& entry : cache.slots) {
             if (entry.guest_page == guest_page && entry.host_ptr != nullptr) {
-                std::memcpy(dest_pointer, entry.host_ptr + page_offset, size);
+                const u8* const src = entry.host_ptr + page_offset;
+                if (!VideoCommon::Nx2Snap::OverlayActive() ||
+                    !VideoCommon::Nx2Snap::TryReadOverlay(address, src, dest_pointer, size)) [[likely]] {
+                    std::memcpy(dest_pointer, src, size);
+                }
                 return;
             }
         }
@@ -662,10 +694,15 @@ void DeviceMemoryManager<Traits>::ReadBlockUnsafe(DAddr address, void* dest_poin
             auto* const mem_ptr = GetPointerFromRaw<u8>((PAddr(phys_addr - 1) << Memory::YUZU_PAGEBITS));
             cache.slots[cache.cursor] = TranslationEntry{.guest_page = guest_page, .host_ptr = mem_ptr};
             cache.cursor = (cache.cursor + 1) & 3U;
-            std::memcpy(dest_pointer, mem_ptr + page_offset, size);
+            const u8* const src = mem_ptr + page_offset;
+            if (!VideoCommon::Nx2Snap::OverlayActive() ||
+                !VideoCommon::Nx2Snap::TryReadOverlay(address, src, dest_pointer, size)) [[likely]] {
+                std::memcpy(dest_pointer, src, size);
+            }
             return;
         }
     }
+    DAddr current_addr = address;
     WalkBlock(
         address, size,
         [&](size_t copy_amount, DAddr current_vaddr) {
@@ -679,10 +716,15 @@ void DeviceMemoryManager<Traits>::ReadBlockUnsafe(DAddr address, void* dest_poin
             std::memset(dest_pointer, 0, copy_amount);
         },
         [&](size_t copy_amount, const u8* const src_ptr) {
-            std::memcpy(dest_pointer, src_ptr, copy_amount);
+            if (!VideoCommon::Nx2Snap::OverlayActive() ||
+                !VideoCommon::Nx2Snap::TryReadOverlay(current_addr, src_ptr, dest_pointer,
+                                                      copy_amount)) [[likely]] {
+                std::memcpy(dest_pointer, src_ptr, copy_amount);
+            }
         },
         [&](const std::size_t copy_amount) {
             dest_pointer = static_cast<u8*>(dest_pointer) + copy_amount;
+            current_addr += copy_amount;
         });
 }
 
