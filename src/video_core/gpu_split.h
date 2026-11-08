@@ -16,6 +16,7 @@
 #include <utility>
 
 #include "common/common_types.h"
+#include "video_core/nx2_war_probe.h"
 #include "video_core/split_write_tracker.h"
 
 namespace Core {
@@ -532,6 +533,75 @@ public:
     /// not yet.
     bool WaitUntil(u64 position, DrainSite site) {
         return WaitFor((std::min)(position, write_position), site);
+    }
+
+    /// EDEN_NX2_RUN_AHEAD_OVERLAY=1: opt-in reply-time page snapshot overlay and own-write
+    /// forwarding for frame-ahead execution.
+    [[nodiscard]] static bool OverlayOn() {
+        return Nx2Snap::OverlayOn();
+    }
+    [[nodiscard]] static bool RunAheadOverlayOn() {
+        return Nx2Snap::OverlayOn();
+    }
+    [[nodiscard]] static bool OverlayActive() {
+        return Nx2Snap::OverlayActive();
+    }
+    [[nodiscard]] static const u8* OverlayPage(u64 phys) {
+        return Nx2Snap::OverlayPage(phys);
+    }
+    [[nodiscard]] static const u8* OverlayPointer(u64 device_addr, const u8* host = nullptr) {
+        return Nx2Snap::OverlayPointer(device_addr, host);
+    }
+    static bool TryReadOverlay(u64 device_addr, void* dst, size_t size) {
+        return Nx2Snap::TryReadOverlay(device_addr, dst, size);
+    }
+    static bool TryReadOverlay(u64 device_addr, const void* host, void* dst, size_t size) {
+        return Nx2Snap::TryReadOverlay(device_addr, host, dst, size);
+    }
+    static bool ReadOverlay(u64 device_addr, void* dst, size_t size) {
+        return Nx2Snap::ReadOverlay(device_addr, dst, size);
+    }
+    static bool ReadOverlay(u64 device_addr, const void* host, void* dst, size_t size) {
+        return Nx2Snap::ReadOverlay(device_addr, host, dst, size);
+    }
+    template <typename T>
+        requires (!std::is_pointer_v<T>)
+    static bool TryReadOverlay(u64 device_addr, T& out) {
+        return Nx2Snap::TryReadOverlay(device_addr, out);
+    }
+    template <typename T>
+        requires (!std::is_pointer_v<T>)
+    static bool TryReadOverlay(u64 device_addr, const void* host, T& out) {
+        return Nx2Snap::TryReadOverlay(device_addr, host, out);
+    }
+    template <typename T>
+    static T ReadOverlay(u64 device_addr, const void* host = nullptr) {
+        return Nx2Snap::ReadOverlay<T>(device_addr, host);
+    }
+    static void OnOwnWrite(u64 device_addr, u64 size, const void* src = nullptr) {
+        Nx2Snap::OnOwnWrite(device_addr, size, src);
+    }
+    static void NoteOwnWrite(u64 device_addr, u64 size, const void* src = nullptr) {
+        Nx2Snap::NoteOwnWrite(device_addr, size, src);
+    }
+    static void OnOwnPointerWrite(const void* host, u64 size, const void* src = nullptr) {
+        Nx2Snap::OnOwnPointerWrite(host, size, src);
+    }
+    static void NoteOwnPointerWrite(const void* host, u64 size, const void* src = nullptr) {
+        Nx2Snap::NoteOwnPointerWrite(host, size, src);
+    }
+    template <typename Ptr>
+        requires std::is_pointer_v<Ptr>
+    static void OnOwnWrite(Ptr host, u64 size, const void* src = nullptr) {
+        Nx2Snap::OnOwnWrite(host, size, src);
+    }
+    template <typename Ptr>
+        requires std::is_pointer_v<Ptr>
+    static void NoteOwnWrite(Ptr host, u64 size, const void* src = nullptr) {
+        Nx2Snap::NoteOwnWrite(host, size, src);
+    }
+    static void NoteFrontMacroPage(u64 phys) {
+        Nx2Snap::NoteFrontMacroPage(phys);
     }
 
 private:
