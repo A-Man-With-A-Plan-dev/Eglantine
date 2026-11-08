@@ -46,6 +46,19 @@ constexpr u32 MacroRegistersStart = 0xE00;
 // EDEN_NX2_3D_METHODS: log the first write to each 3D register (finds methods Eden doesn't model).
 static const bool g_trace_first_method_writes = std::getenv("EDEN_NX2_3D_METHODS") != nullptr;
 
+// EDEN_NX2_SUPER_MACRO: default ON, 0 disables Super-Macro & Macro DMA Fast-Path.
+static bool SuperMacroEnabled() {
+    static const bool enabled = [] {
+        const char* env = std::getenv("EDEN_NX2_SUPER_MACRO");
+        if (env == nullptr) {
+            return true;
+        }
+        return std::strcmp(env, "0") != 0 && std::strcmp(env, "off") != 0 &&
+               std::strcmp(env, "false") != 0;
+    }();
+    return enabled;
+}
+
 Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)
     : draw_manager()
     , memory_manager{memory_manager_}
@@ -359,6 +372,9 @@ void Maxwell3D::ProcessDirtyRegisters(u32 method, u32 argument) {
     if (draw_manager.HasDeferredDraw() && !DrawManager::IsInstanceLoopMethod(method)) [[unlikely]] {
         draw_manager.DrawDeferred(*this, true);
     }
+    if (SuperMacroEnabled() && !execution_mask[method] && regs.reg_array[method] == argument) {
+        return;
+    }
     regs.reg_array[method] = argument;
     for (auto const& table : dirty.tables)
         dirty.flags[table[method]] = true;
@@ -456,6 +472,9 @@ void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argume
 void Maxwell3D::CallMacroMethod(Core::System& system, u32 method, std::span<const u32> parameters) {
     // Reset the current macro.
     executing_macro = 0;
+    if (front) {
+        front->dma_cache.Invalidate();
+    }
 
     // Lookup the macro offset
     const u32 entry =
@@ -1121,6 +1140,20 @@ struct Maxwell3D::FrontState {
     u32 executing_macro{};
     std::vector<u32> parameters;
     std::vector<u32> dma_words; ///< FrontDmaReadEarly's words
+    struct DmaMicroCache {
+        static constexpr size_t LineBytes = 64;
+        static constexpr size_t LineWords = LineBytes / sizeof(u32); // 16 words
+
+        GPUVAddr line_addr{~GPUVAddr{0}};
+        bool valid{false};
+        std::array<u32, LineWords> words{};
+
+        void Invalidate() noexcept {
+            valid = false;
+            line_addr = ~GPUVAddr{0};
+        }
+    };
+    DmaMicroCache dma_cache;
     /// Nx2Perf dma_forward: registers the back writes from DMA words the front never read
     /// (regs holds a stale value), and macros (by index) seen doing an MME DMA read.
     std::bitset<Regs::NUM_REGS> unknown_regs;
@@ -1921,6 +1954,7 @@ void Maxwell3D::FrontCallMethod(Core::System& system, VideoCommon::GpuSplit& spl
     if (method >= MacroRegistersStart) {
         if (fs.executing_macro == 0) {
             fs.executing_macro = method;
+            fs.dma_cache.Invalidate();
         }
         fs.parameters.push_back(argument);
         if (is_last_call) {
@@ -1957,6 +1991,7 @@ void Maxwell3D::FrontCallMultiMethod(Core::System& system, VideoCommon::GpuSplit
             fs.executing_macro == 0 && fs.parameters.empty()) {
             // The whole call in this run: the macro reads the words where they are.
             fs.executing_macro = method;
+            fs.dma_cache.Invalidate();
             if (!options.verify) [[likely]] {
                 FrontRunMacro(system, split, fs, {base_start, amount});
                 return;
@@ -2100,6 +2135,7 @@ bool Maxwell3D::FrontCallMacro(Core::System& system, VideoCommon::GpuSplit& spli
     if (fs.executing_macro != 0 || !fs.parameters.empty()) {
         return false;
     }
+    fs.dma_cache.Invalidate();
     // FrontCallMultiMethod's macro_borrow path: the macro reads the words where they are.
     fs.executing_macro = method;
     FrontRunMacro(system, split, fs, words);
@@ -2112,6 +2148,7 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
     namespace Profile = VideoCommon::Nx2Profile;
     const u32 method = fs.executing_macro;
     fs.executing_macro = 0;
+    fs.dma_cache.Invalidate();
     auto& engine = GetNativeMacroEngine();
     const auto positions = GetNativeMacroPositions();
     const u32 start = positions[((method - MacroRegistersStart) >> 1) % positions.size()];
@@ -2567,6 +2604,13 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
             }
             return fs.regs[address];
         };
+        bool cb_pos_touched = false;
+        constexpr u32 cb_offset = MAXWELL3D_REG_INDEX(const_buffer.offset);
+        constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
+        constexpr u32 cb_size = MAXWELL3D_REG_INDEX(const_buffer.size);
+        constexpr u32 cb_high = MAXWELL3D_REG_INDEX(const_buffer.address_high);
+        constexpr u32 cb_low = MAXWELL3D_REG_INDEX(const_buffer.address_low);
+
         const auto front_emit = [&](u32 address, u32 value) {
             if (trace) [[unlikely]] {
                 trace_line += fmt::format(" {:#x}={:#x}", address, value);
@@ -2576,6 +2620,19 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
             }
             if (address >= MacroRegistersStart) {
                 return false;
+            }
+            if (address == cb_offset || (address >= cb_data && address < cb_data + 16)) {
+                cb_pos_touched = true;
+            }
+            if (SuperMacroEnabled()) {
+                const bool is_cb_meta = (address == cb_size || address == cb_high || address == cb_low);
+                if ((!is_cb_meta || !cb_pos_touched) && same_value(address, value)) {
+                    if (profile) [[unlikely]] {
+                        Profile::Add(Profile::Counter::MethodWrites, 1);
+                        Profile::Add(Profile::Counter::SameValueWrites, 1);
+                    }
+                    return true;
+                }
             }
             if (!options.batch || !same_value(address, value)) {
                 FrontWrite(split, fs, address, value, true, true);
@@ -3048,6 +3105,90 @@ void Maxwell3D::VerifyExecSameDrop(Core::System& system, u32 method, u32 argumen
     }
 }
 
+namespace {
+
+bool FrontDmaReadEarlyBlock64(Maxwell3D& engine, VideoCommon::GpuSplit& split,
+                              Maxwell3D::FrontState& fs, GPUVAddr line_base, u32* out_words) {
+    constexpr u64 bytes = 64;
+    constexpr u32 words = 16;
+    const bool sparse = line_base < Tegra::g_nx2_sparse_high.load(std::memory_order_relaxed) &&
+                        Tegra::g_nx2_sparse_low.load(std::memory_order_relaxed) < line_base + bytes;
+    if (sparse) {
+        return false;
+    }
+    const u64 consumed = split.SettleWrites();
+    const bool writer_set =
+        VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::MacroReadWriterSet);
+
+    const GPUVAddr page = line_base & ~GPUVAddr{0xfff};
+    const std::optional<DAddr> device = engine.GetMemoryManager().GpuToCpuAddress(page);
+    if (!device || Tegra::Nx2IsGpuWrittenRegion(*device) || Tegra::Nx2IsGpuWritten(*device)) {
+        return false;
+    }
+    const u64 device_page = *device & ~u64{0xfff};
+    const u64 range_begin = device_page + (line_base - page);
+    constexpr u64 range_size = bytes;
+
+    const bool exact = VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::ExactNotedWrites);
+    using WriteKind = VideoCommon::SplitWriteTracker::WriteKind;
+    const u64 target_begin = exact ? range_begin : device_page;
+    const u64 target_end = exact ? range_begin + range_size : device_page + 0x1000;
+
+    u64 target = writer_set ? split.Writes().WriterReadTarget(target_begin, target_end)
+                            : split.ReadTarget(target_begin, target_end);
+    const u64 write_target = split.Writes().LastWriteTo(target_begin, target_end);
+    const u64 other_write_target =
+        split.Writes().LastWriteTo(target_begin, target_end, WriteKind::Other);
+
+    const bool cb_overlay =
+        VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::MacroReadCbOverlay);
+    const bool overlay_writers =
+        cb_overlay && writer_set &&
+        VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::MacroReadOverlayWriters);
+    const u64 unlocalized_target = (std::max)(
+        split.Writes().LastUnknown(),
+        overlay_writers ? split.Writes().LastWriter() : split.Writes().LastGpu());
+    const bool overlay = cb_overlay && write_target > unlocalized_target &&
+                         other_write_target == 0 && split.ConstBufferWordsKept(consumed);
+    if (overlay) {
+        target = unlocalized_target;
+    }
+    split.WaitUntil(target, VideoCommon::DrainSite::MacroDmaWrites);
+    const u64 consumed_now = split.ConsumedNow();
+
+    const bool skipped_draws = writer_set && split.Writes().LastGpu() > consumed_now;
+    if (skipped_draws) {
+        const u64 epoch = Tegra::g_nx2_code_epoch.load(std::memory_order_acquire);
+        if (!split.Writes().DrawsValid(consumed_now, epoch) ||
+            split.Writes().AnyPendingWrite(consumed_now, split.Writes().LastGpu(),
+                                           [exact](u64 begin, u64 end) {
+                                               if (exact) {
+                                                   begin &= ~u64{0xfff};
+                                                   end = (end + 0xfff) & ~u64{0xfff};
+                                               }
+                                               return Tegra::Nx2IsProvenCode(begin, end - begin);
+                                           })) {
+            return false;
+        }
+    }
+    if (Tegra::Nx2IsGpuWrittenRegion(device_page) || Tegra::Nx2IsGpuWritten(device_page)) {
+        return false;
+    }
+    if (const u64 async_position = split.HasAsyncWrite(range_begin, range_size);
+        async_position != 0 && (async_position > consumed_now ||
+                                !Tegra::Nx2AsyncReportsSettled(range_begin, range_size))) {
+        return false;
+    }
+    engine.GetMemoryManager().ReadWordsUnsafe(line_base, out_words, words);
+    if (overlay) {
+        split.OverlayConstBufferWords(consumed_now, range_begin, range_size,
+                                      reinterpret_cast<u8*>(out_words));
+    }
+    return true;
+}
+
+} // Anonymous namespace
+
 void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 macro, u32 method,
                              u32 count) {
     const VideoCommon::Nx2Snap::FrontMacroScope snap_scope; // run_ahead_snapshot_probe
@@ -3057,6 +3198,73 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
     const u32 ram = fs.regs[0x156];
     const u32 words = std::min<u32>(count, 0x1000);
     const size_t read_bytes = size_t{words} * sizeof(u32);
+
+    const GPUVAddr line_base = source & ~GPUVAddr{63};
+    const u32 offset_in_line = static_cast<u32>((source - line_base) / sizeof(u32));
+    const bool fits_in_line = (offset_in_line + words <= FrontState::DmaMicroCache::LineWords);
+
+    if (SuperMacroEnabled() && fits_in_line && !Tegra::Nx2CmdPageDiag::g_enabled &&
+        !VideoCommon::Nx2Perf::Verify()) {
+        if (fs.dma_cache.valid && fs.dma_cache.line_addr == line_base) {
+            if (VideoCommon::Nx2Profile::Enabled()) [[unlikely]] {
+                VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DmaReadBytes, read_bytes);
+            }
+            if (method == 0x158) {
+                fs.parameters.insert(fs.parameters.end(),
+                                     fs.dma_cache.words.begin() + offset_in_line,
+                                     fs.dma_cache.words.begin() + offset_in_line + words);
+            } else if (ram < native_data_ram.size()) {
+                const size_t copy_words = (std::min<size_t>)(words, native_data_ram.size() - ram);
+                std::memcpy(native_data_ram.data() + ram,
+                            fs.dma_cache.words.data() + offset_in_line,
+                            copy_words * sizeof(u32));
+            }
+            return;
+        }
+
+        // Cache miss: read 64-byte (16-word) aligned block from line_base
+        bool early_ok = false;
+        if (VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::MacroReadEarly)) {
+            early_ok = FrontDmaReadEarlyBlock64(*this, split, fs, line_base, fs.dma_cache.words.data());
+        }
+        if (!early_ok) {
+            split.Drain(VideoCommon::DrainSite::MacroDmaRead);
+            if (VideoCommon::Nx2Profile::Enabled()) [[unlikely]] {
+                VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DmaReadBytes, 64);
+            }
+            const bool flush_buffers =
+                memory_manager.IsMemoryDirty(line_base, 64, VideoCommon::CacheType::BufferCache);
+            split.Run(
+                [memory = &memory_manager, line_base, flush_buffers] {
+                    if (flush_buffers) {
+                        memory->FlushRegion(line_base, 64, VideoCommon::CacheType::BufferCache);
+                    }
+                    memory->FlushQueryResults(line_base, 64);
+                },
+                VideoCommon::DrainSite::MacroDmaFlush);
+            memory_manager.ReadBlock(line_base, fs.dma_cache.words.data(), 64);
+        }
+        fs.dma_cache.line_addr = line_base;
+        fs.dma_cache.valid = true;
+
+        if (VideoCommon::Nx2Profile::Enabled()) [[unlikely]] {
+            VideoCommon::Nx2Profile::Add(VideoCommon::Nx2Profile::Counter::DmaReadBytes, read_bytes);
+        }
+        if (method == 0x158) {
+            fs.parameters.insert(fs.parameters.end(),
+                                 fs.dma_cache.words.begin() + offset_in_line,
+                                 fs.dma_cache.words.begin() + offset_in_line + words);
+        } else if (ram < native_data_ram.size()) {
+            const size_t copy_words = (std::min<size_t>)(words, native_data_ram.size() - ram);
+            std::memcpy(native_data_ram.data() + ram,
+                        fs.dma_cache.words.data() + offset_in_line,
+                        copy_words * sizeof(u32));
+        }
+        return;
+    }
+
+    fs.dma_cache.Invalidate();
+
     std::vector<u32> diag_before;
     if (Tegra::Nx2CmdPageDiag::g_enabled) {
         diag_before.resize(words);
