@@ -472,9 +472,6 @@ void Maxwell3D::ProcessMethodCall(u32 method, u32 argument, u32 nonshadow_argume
 void Maxwell3D::CallMacroMethod(Core::System& system, u32 method, std::span<const u32> parameters) {
     // Reset the current macro.
     executing_macro = 0;
-    if (front) {
-        front->dma_cache.Invalidate();
-    }
 
     // Lookup the macro offset
     const u32 entry =
@@ -3108,7 +3105,7 @@ void Maxwell3D::VerifyExecSameDrop(Core::System& system, u32 method, u32 argumen
 namespace {
 
 bool FrontDmaReadEarlyBlock64(Maxwell3D& engine, VideoCommon::GpuSplit& split,
-                              Maxwell3D::FrontState& fs, GPUVAddr line_base, u32* out_words) {
+                              GPUVAddr line_base, u32* out_words) {
     constexpr u64 bytes = 64;
     constexpr u32 words = 16;
     const bool sparse = line_base < Tegra::g_nx2_sparse_high.load(std::memory_order_relaxed) &&
@@ -3225,7 +3222,7 @@ void Maxwell3D::FrontDmaRead(VideoCommon::GpuSplit& split, FrontState& fs, u32 m
         // Cache miss: read 64-byte (16-word) aligned block from line_base
         bool early_ok = false;
         if (VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::MacroReadEarly)) {
-            early_ok = FrontDmaReadEarlyBlock64(*this, split, fs, line_base, fs.dma_cache.words.data());
+            early_ok = FrontDmaReadEarlyBlock64(*this, split, line_base, fs.dma_cache.words.data());
         }
         if (!early_ok) {
             split.Drain(VideoCommon::DrainSite::MacroDmaRead);
