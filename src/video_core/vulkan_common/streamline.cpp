@@ -3,10 +3,16 @@
 
 // NVIDIA DLSS through NVIDIA Streamline, with Streamline's manual hooking.
 
+#include "video_core/vulkan_common/streamline.h"
+
+#ifdef EGLANTINE_STREAMLINE
+
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <filesystem>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -19,7 +25,6 @@
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/settings.h"
-#include "video_core/vulkan_common/streamline.h"
 #include "video_core/vulkan_common/streamline_api.h"
 
 #include <sl_security.h>
@@ -40,15 +45,39 @@ constexpr u32 MIN_DLSS_MAJOR = 310;
 
 using Version = std::array<u32, 4>;
 
+struct CachedFrameToken {
+    u32 frame_id{0xFFFFFFFFu};
+    sl::FrameToken* token{};
+};
+
 struct State {
     HMODULE module{};
     Api api{};
+    PFun_slSetTag* set_tag{};
+    PFun_slSetTagForFrame* set_tag_for_frame{};
+    PFun_slReflexGetState* reflex_get_state{};
+    PFun_slReflexSleep* reflex_sleep{};
+    PFun_slReflexSetOptions* reflex_set_options{};
+    PFun_slPCLGetState* pcl_get_state{};
+    PFun_slPCLSetMarker* pcl_set_marker{};
+    PFun_slPCLSetOptions* pcl_set_options{};
+    PFun_slDLSSGGetState* dlssg_get_state{};
+    PFun_slDLSSGSetOptions* dlssg_set_options{};
     std::wstring plugin_dir;
     std::wstring model_dir;
     std::vector<std::string> instance_extensions;
     std::vector<std::string> device_extensions;
+    std::mutex token_mutex;
+    std::array<CachedFrameToken, 8> token_cache{};
     bool started{};
     bool attached{};
+    bool reflex_available{};
+    bool pcl_available{};
+    bool dlssg_available{};
+    bool dlssg_enabled{};
+    u32 dlssg_max_frames{};
+    u32 dlssg_frames_to_generate{};
+    std::atomic<bool> logged_first_dlssg_tag{false};
 };
 
 State& GetState() {
@@ -59,6 +88,46 @@ State& GetState() {
 int LogLevel() {
     const char* const value = std::getenv("EDEN_NX2_DLSS_LOG");
     return value ? std::atoi(value) : 0;
+}
+
+bool ReflexWantedByEnv() {
+    const char* const value = std::getenv("EDEN_NX2_REFLEX");
+    if (!value || !*value) {
+        return true;
+    }
+    const std::string_view sv{value};
+    return sv != "0" && sv != "off" && sv != "false";
+}
+
+bool ReflexBoostByEnv() {
+    const char* const value = std::getenv("EDEN_NX2_REFLEX");
+    return value && std::string_view{value} == "boost";
+}
+
+bool ReflexSleepWantedByEnv() {
+    const char* const value = std::getenv("EDEN_NX2_REFLEX_SLEEP");
+    if (!value || !*value) {
+        return true;
+    }
+    const std::string_view sv{value};
+    return sv != "0" && sv != "off" && sv != "false";
+}
+
+bool DlssGProbeWantedByEnv() {
+    const char* const value = std::getenv("EDEN_NX2_DLSSG_PROBE");
+    return value && std::atoi(value) != 0;
+}
+
+u32 DlssGFramesFromEnv() {
+    const char* const value = std::getenv("EDEN_NX2_DLSSG_FRAMES");
+    if (!value || !*value) {
+        return 0;
+    }
+    const int parsed = std::atoi(value);
+    if (parsed <= 0) {
+        return 0;
+    }
+    return static_cast<u32>(std::clamp(parsed, 1, 3));
 }
 
 void LogFromStreamline(sl::LogType type, const char* message) {
@@ -100,6 +169,11 @@ bool Resolve(HMODULE module, const char* name, T*& function) {
         LOG_ERROR(Render_Vulkan, "sl.interposer.dll has no {}", name);
     }
     return function != nullptr;
+}
+
+template <typename T>
+void ResolveOptional(HMODULE module, const char* name, T*& function) {
+    function = reinterpret_cast<T*>(GetProcAddress(module, name));
 }
 
 std::optional<Version> ReadVersion(const std::filesystem::path& path) {
@@ -198,6 +272,8 @@ bool Load(State& state, const std::filesystem::path& path) {
     }
     Api& api = state.api;
     const HMODULE m = state.module;
+    ResolveOptional(m, "slSetTag", state.set_tag);
+    ResolveOptional(m, "slSetTagForFrame", state.set_tag_for_frame);
     if (Resolve(m, "slInit", api.init) && Resolve(m, "slShutdown", api.shutdown) &&
         Resolve(m, "slIsFeatureSupported", api.is_feature_supported) &&
         Resolve(m, "slGetFeatureRequirements", api.get_feature_requirements) &&
@@ -213,6 +289,8 @@ bool Load(State& state, const std::filesystem::path& path) {
     FreeLibrary(state.module);
     state.module = nullptr;
     state.api = {};
+    state.set_tag = nullptr;
+    state.set_tag_for_frame = nullptr;
     return false;
 }
 
@@ -222,6 +300,53 @@ std::vector<std::string> Names(uint32_t count, const char** names) {
         result.emplace_back(names[i]);
     }
     return result;
+}
+
+sl::FrameToken* GetFrameToken(State& state, u32 frame_id) {
+    std::scoped_lock lock{state.token_mutex};
+    CachedFrameToken& slot = state.token_cache[frame_id % state.token_cache.size()];
+    if (slot.frame_id == frame_id && slot.token != nullptr) {
+        return slot.token;
+    }
+    sl::FrameToken* token = nullptr;
+    const uint32_t index = frame_id;
+    if (state.api.get_new_frame_token(token, &index) != sl::Result::eOk || !token) {
+        return nullptr;
+    }
+    slot.frame_id = frame_id;
+    slot.token = token;
+    return token;
+}
+
+sl::float4x4 ToMatrix(const std::array<f32, 16>& m) {
+    sl::float4x4 matrix;
+    matrix.setRow(0, {m[0], m[1], m[2], m[3]});
+    matrix.setRow(1, {m[4], m[5], m[6], m[7]});
+    matrix.setRow(2, {m[8], m[9], m[10], m[11]});
+    matrix.setRow(3, {m[12], m[13], m[14], m[15]});
+    return matrix;
+}
+
+sl::float4x4 IdentityMatrix() {
+    sl::float4x4 matrix;
+    matrix.setRow(0, {1.0f, 0.0f, 0.0f, 0.0f});
+    matrix.setRow(1, {0.0f, 1.0f, 0.0f, 0.0f});
+    matrix.setRow(2, {0.0f, 0.0f, 1.0f, 0.0f});
+    matrix.setRow(3, {0.0f, 0.0f, 0.0f, 1.0f});
+    return matrix;
+}
+
+sl::Resource MakeResource(const DlssGImage& img) {
+    sl::Resource res{sl::ResourceType::eTex2d, img.image, nullptr, img.view,
+                     static_cast<uint32_t>(img.layout)};
+    res.width = img.extent.width;
+    res.height = img.extent.height;
+    res.nativeFormat = static_cast<uint32_t>(img.format);
+    res.mipLevels = 1;
+    res.arrayLayers = 1;
+    res.flags = 0;
+    res.usage = img.usage;
+    return res;
 }
 
 } // Anonymous namespace
@@ -322,10 +447,18 @@ bool Start() {
     // Streamline's plugins come from the loader's folder or the NVIDIA app's downloads (OTA); the
     // DLSS model from the loader's folder, else the NVIDIA app's copy.
     const wchar_t* plugin_paths[] = {state.plugin_dir.c_str(), state.model_dir.c_str()};
-    const char* const probe_env = std::getenv("EDEN_NX2_DLSSG_PROBE");
-    const bool probe_dlssg = probe_env && std::atoi(probe_env) != 0;
-    const sl::Feature features[] = {sl::kFeatureDLSS, sl::kFeatureDLSS_G, sl::kFeatureReflex,
-                                    sl::kFeaturePCL};
+    const bool probe_dlssg = DlssGProbeWantedByEnv();
+    const bool want_reflex = ReflexWantedByEnv() || probe_dlssg;
+    std::vector<sl::Feature> features_to_load;
+    features_to_load.push_back(sl::kFeatureDLSS);
+    if (probe_dlssg) {
+        features_to_load.push_back(sl::kFeatureDLSS_G);
+    }
+    if (want_reflex) {
+        features_to_load.push_back(sl::kFeatureReflex);
+        features_to_load.push_back(sl::kFeaturePCL);
+    }
+
     sl::Preferences preferences{};
     preferences.logLevel = LogLevel() >= 2 ? sl::LogLevel::eVerbose : sl::LogLevel::eDefault;
     preferences.logMessageCallback = LogFromStreamline;
@@ -334,17 +467,23 @@ bool Start() {
     preferences.flags = sl::PreferenceFlags::eDisableCLStateTracking |
                         sl::PreferenceFlags::eUseManualHooking | sl::PreferenceFlags::eAllowOTA |
                         sl::PreferenceFlags::eLoadDownloadedPlugins;
-    preferences.featuresToLoad = features;
-    preferences.numFeaturesToLoad = probe_dlssg ? static_cast<uint32_t>(std::size(features)) : 1u;
+    preferences.featuresToLoad = features_to_load.data();
+    preferences.numFeaturesToLoad = static_cast<uint32_t>(features_to_load.size());
     preferences.engine = sl::EngineType::eCustom;
     preferences.engineVersion = "1.0";
     preferences.projectId = PROJECT_ID;
     preferences.renderAPI = sl::RenderAPI::eVulkan;
     const Api& api = state.api;
-    if (const sl::Result result = api.init(preferences, sl::kSDKVersion);
-        result != sl::Result::eOk) {
+    sl::Result init_res = api.init(preferences, sl::kSDKVersion);
+    if (init_res != sl::Result::eOk && features_to_load.size() > 1) {
+        const sl::Feature dlss_only[] = {sl::kFeatureDLSS};
+        preferences.featuresToLoad = dlss_only;
+        preferences.numFeaturesToLoad = 1u;
+        init_res = api.init(preferences, sl::kSDKVersion);
+    }
+    if (init_res != sl::Result::eOk) {
         LOG_ERROR(Render_Vulkan, "NVIDIA Streamline failed to start (result {}); using FSR 3.1",
-                  static_cast<int>(result));
+                  static_cast<int>(init_res));
         return false;
     }
     if (probe_dlssg) {
@@ -386,7 +525,7 @@ bool Start() {
     }
     sl::FeatureRequirements requirements{};
     if (const sl::Result result = api.get_feature_requirements(sl::kFeatureDLSS, requirements);
-        result != sl::Result::eOk) {
+         result != sl::Result::eOk) {
         LOG_WARNING(Render_Vulkan,
                     "Streamline found no DLSS plugin (result {}); put sl.dlss.dll next to "
                     "sl.interposer.dll or install the NVIDIA app. Using FSR 3.1",
@@ -455,8 +594,65 @@ bool AttachDevice(VkInstance instance, VkPhysicalDevice physical, VkDevice devic
     }
     sl::AdapterInfo adapter{};
     adapter.vkPhysicalDevice = physical;
-    const char* const probe_env = std::getenv("EDEN_NX2_DLSSG_PROBE");
-    if (probe_env && std::atoi(probe_env) != 0) {
+
+    const bool probe_dlssg = DlssGProbeWantedByEnv();
+    const bool want_reflex = ReflexWantedByEnv() || probe_dlssg;
+
+    if (want_reflex) {
+        const sl::Result pcl_supported = state.api.is_feature_supported(sl::kFeaturePCL, adapter);
+        if (pcl_supported == sl::Result::eOk) {
+            void* fn_set_marker = nullptr;
+            void* fn_get_state = nullptr;
+            void* fn_set_options = nullptr;
+            void(state.api.get_feature_function(sl::kFeaturePCL, "slPCLSetMarker", fn_set_marker));
+            void(state.api.get_feature_function(sl::kFeaturePCL, "slPCLGetState", fn_get_state));
+            void(state.api.get_feature_function(sl::kFeaturePCL, "slPCLSetOptions", fn_set_options));
+            state.pcl_set_marker = reinterpret_cast<PFun_slPCLSetMarker*>(fn_set_marker);
+            state.pcl_get_state = reinterpret_cast<PFun_slPCLGetState*>(fn_get_state);
+            state.pcl_set_options = reinterpret_cast<PFun_slPCLSetOptions*>(fn_set_options);
+            state.pcl_available = state.pcl_set_marker != nullptr;
+        }
+
+        const sl::Result reflex_supported =
+            state.api.is_feature_supported(sl::kFeatureReflex, adapter);
+        if (reflex_supported == sl::Result::eOk) {
+            void* fn_set_options = nullptr;
+            void* fn_sleep = nullptr;
+            void* fn_get_state = nullptr;
+            void(state.api.get_feature_function(sl::kFeatureReflex, "slReflexSetOptions",
+                                                fn_set_options));
+            void(state.api.get_feature_function(sl::kFeatureReflex, "slReflexSleep", fn_sleep));
+            void(state.api.get_feature_function(sl::kFeatureReflex, "slReflexGetState",
+                                                fn_get_state));
+            state.reflex_set_options = reinterpret_cast<PFun_slReflexSetOptions*>(fn_set_options);
+            state.reflex_sleep = reinterpret_cast<PFun_slReflexSleep*>(fn_sleep);
+            state.reflex_get_state = reinterpret_cast<PFun_slReflexGetState*>(fn_get_state);
+            if (state.reflex_set_options) {
+                sl::ReflexOptions reflex_options{};
+                reflex_options.mode = ReflexBoostByEnv() ? sl::ReflexMode::eLowLatencyWithBoost
+                                                         : sl::ReflexMode::eLowLatency;
+                reflex_options.frameLimitUs = 0;
+                const sl::Result set_res = state.reflex_set_options(reflex_options);
+                bool low_latency_hw = false;
+                if (state.reflex_get_state) {
+                    sl::ReflexState reflex_state{};
+                    if (state.reflex_get_state(reflex_state) == sl::Result::eOk) {
+                        low_latency_hw = reflex_state.lowLatencyAvailable;
+                    }
+                }
+                state.reflex_available = set_res == sl::Result::eOk;
+                LOG_INFO(Render_Vulkan,
+                         "Streamline Reflex configured: mode={} result={} low_latency_available={} "
+                         "pcl_available={}",
+                         reflex_options.mode == sl::ReflexMode::eLowLatencyWithBoost
+                             ? "eLowLatencyWithBoost"
+                             : "eLowLatency",
+                         static_cast<int>(set_res), low_latency_hw, state.pcl_available);
+            }
+        }
+    }
+
+    if (probe_dlssg) {
         const sl::Result dlssg_supported =
             state.api.is_feature_supported(sl::kFeatureDLSS_G, adapter);
         const sl::Result reflex_supported =
@@ -471,11 +667,17 @@ bool AttachDevice(VkInstance instance, VkPhysicalDevice physical, VkDevice devic
             void* get_state_fn = nullptr;
             const sl::Result fn_res =
                 state.api.get_feature_function(sl::kFeatureDLSS_G, "slDLSSGGetState", get_state_fn);
-            if (fn_res == sl::Result::eOk && get_state_fn != nullptr) {
-                auto* const get_dlssg_state = reinterpret_cast<PFun_slDLSSGGetState*>(get_state_fn);
+            void* set_options_fn = nullptr;
+            void(state.api.get_feature_function(sl::kFeatureDLSS_G, "slDLSSGSetOptions",
+                                                set_options_fn));
+            state.dlssg_get_state = reinterpret_cast<PFun_slDLSSGGetState*>(get_state_fn);
+            state.dlssg_set_options = reinterpret_cast<PFun_slDLSSGSetOptions*>(set_options_fn);
+            if (fn_res == sl::Result::eOk && state.dlssg_get_state != nullptr) {
                 sl::DLSSGState dlssg_state{};
                 const sl::Result state_res =
-                    get_dlssg_state(sl::ViewportHandle{0}, dlssg_state, nullptr);
+                    state.dlssg_get_state(sl::ViewportHandle{0}, dlssg_state, nullptr);
+                state.dlssg_max_frames = dlssg_state.numFramesToGenerateMax;
+                state.dlssg_available = state.dlssg_set_options != nullptr;
                 LOG_INFO(Render_Vulkan,
                          "Streamline slDLSSGGetState probe: result={} status={:#x} max_gen={} "
                          "vsync_supported={} dyn_mfg_supported={} min_dim={} vram_bytes={}",
@@ -514,6 +716,11 @@ bool AttachDevice(VkInstance instance, VkPhysicalDevice physical, VkDevice devic
     hook(dld.vkQueuePresentKHR, "vkQueuePresentKHR");
     hook(dld.vkDeviceWaitIdle, "vkDeviceWaitIdle");
     state.attached = true;
+    if (probe_dlssg && state.dlssg_available) {
+        if (const u32 env_frames = DlssGFramesFromEnv(); env_frames > 0) {
+            void(ConfigureDLSSG(true, env_frames));
+        }
+    }
     LOG_INFO(Render_Vulkan, "NVIDIA DLSS is available through Streamline");
     return true;
 }
@@ -523,14 +730,243 @@ bool IsDlssAvailable() {
     return state.started && state.attached;
 }
 
+bool IsReflexAvailable() {
+    const State& state = GetState();
+    return state.started && state.attached && state.reflex_available;
+}
+
+bool IsPclAvailable() {
+    const State& state = GetState();
+    return state.started && state.attached && state.pcl_available;
+}
+
+bool IsDlssGAvailable() {
+    const State& state = GetState();
+    return state.started && state.attached && state.dlssg_available;
+}
+
+bool IsDlssGEnabled() {
+    const State& state = GetState();
+    return state.started && state.attached && state.dlssg_enabled;
+}
+
+u32 DlssGMaxFramesToGenerate() {
+    const State& state = GetState();
+    return state.started && state.attached ? state.dlssg_max_frames : 0u;
+}
+
+void Marker(sl::PCLMarker marker, u32 frame_id) {
+    State& state = GetState();
+    if (!state.started || !state.attached || !state.pcl_available || !state.pcl_set_marker) {
+        return;
+    }
+    sl::FrameToken* const token = GetFrameToken(state, frame_id);
+    if (!token) {
+        return;
+    }
+    void(state.pcl_set_marker(marker, *token));
+}
+
+void ReflexSleep(u32 frame_id) {
+    State& state = GetState();
+    if (!state.started || !state.attached || !state.reflex_available || !state.reflex_sleep) {
+        return;
+    }
+    if (!ReflexSleepWantedByEnv()) {
+        return;
+    }
+    sl::FrameToken* const token = GetFrameToken(state, frame_id);
+    if (!token) {
+        return;
+    }
+    void(state.reflex_sleep(*token));
+}
+
+bool ConfigureDLSSG(bool enabled, u32 num_frames_to_generate) {
+    State& state = GetState();
+    if (!state.started || !state.attached || !state.dlssg_available || !state.dlssg_set_options) {
+        return false;
+    }
+    const u32 max_allowed =
+        state.dlssg_max_frames > 0 ? std::min<u32>(3u, state.dlssg_max_frames) : 3u;
+    const u32 clamped_frames = std::clamp<u32>(num_frames_to_generate, 1u, max_allowed);
+
+    sl::DLSSGOptions options{};
+    options.mode = enabled ? sl::DLSSGMode::eOn : sl::DLSSGMode::eOff;
+    options.numFramesToGenerate = clamped_frames;
+    options.flags = sl::DLSSGFlags::eRetainResourcesWhenOff;
+
+    const sl::ViewportHandle viewport{0u};
+    const sl::Result set_res = state.dlssg_set_options(viewport, options);
+    if (set_res != sl::Result::eOk) {
+        LOG_ERROR(Render_Vulkan,
+                  "Streamline slDLSSGSetOptions(enabled={}, frames={}) failed: result={}", enabled,
+                  clamped_frames, static_cast<int>(set_res));
+        return false;
+    }
+
+    sl::DLSSGState dlssg_state{};
+    if (state.dlssg_get_state) {
+        void(state.dlssg_get_state(viewport, dlssg_state, nullptr));
+    }
+    state.dlssg_enabled = enabled;
+    state.dlssg_frames_to_generate = enabled ? clamped_frames : 0u;
+    LOG_INFO(Render_Vulkan,
+             "Streamline DLSS-G configured: mode={} multiplier={}x (numFramesToGenerate={}/{}) "
+             "status={:#x}",
+             enabled ? "eOn" : "eOff", enabled ? (clamped_frames + 1u) : 1u, clamped_frames,
+             state.dlssg_max_frames, static_cast<u32>(dlssg_state.status));
+    return true;
+}
+
+bool TagDLSSGInputs(const DlssGInputs& in) {
+    State& state = GetState();
+    if (!state.started || !state.attached || (!state.set_tag && !state.set_tag_for_frame)) {
+        return false;
+    }
+    sl::FrameToken* const frame = GetFrameToken(state, in.frame_id);
+    if (!frame) {
+        return false;
+    }
+
+    const sl::ViewportHandle viewport{0u};
+    if (state.dlssg_available && state.dlssg_set_options && !state.dlssg_enabled) {
+        if (const u32 env_frames = DlssGFramesFromEnv(); env_frames > 0) {
+            void(ConfigureDLSSG(true, env_frames));
+        }
+    }
+
+    sl::Constants constants{};
+    constants.cameraViewToClip = ToMatrix(in.camera_view_to_clip);
+    constants.clipToCameraView = ToMatrix(in.clip_to_camera_view);
+    constants.clipToLensClip = IdentityMatrix();
+    constants.clipToPrevClip = ToMatrix(in.clip_to_prev_clip);
+    constants.prevClipToClip = ToMatrix(in.prev_clip_to_clip);
+    constants.jitterOffset = {in.jitter[0], in.jitter[1]};
+    constants.mvecScale = {in.motion_vector_scale[0], in.motion_vector_scale[1]};
+    constants.cameraPinholeOffset = {0.0f, 0.0f};
+    constants.cameraPos = {in.camera_pos[0], in.camera_pos[1], in.camera_pos[2]};
+    constants.cameraUp = {in.camera_up[0], in.camera_up[1], in.camera_up[2]};
+    constants.cameraRight = {in.camera_right[0], in.camera_right[1], in.camera_right[2]};
+    constants.cameraFwd = {in.camera_fwd[0], in.camera_fwd[1], in.camera_fwd[2]};
+    constants.cameraNear = in.camera_near;
+    constants.cameraFar = in.camera_far;
+    constants.cameraFOV = in.camera_fov;
+    constants.cameraAspectRatio = in.camera_aspect_ratio;
+    constants.depthInverted = in.depth_inverted ? sl::eTrue : sl::eFalse;
+    constants.cameraMotionIncluded = in.camera_motion_included ? sl::eTrue : sl::eFalse;
+    constants.motionVectors3D = in.motion_vectors_3d ? sl::eTrue : sl::eFalse;
+    constants.reset = in.reset ? sl::eTrue : sl::eFalse;
+    constants.orthographicProjection = sl::eFalse;
+    constants.motionVectorsDilated = sl::eFalse;
+    constants.motionVectorsJittered = sl::eFalse;
+
+    const sl::Result const_res = state.api.set_constants(constants, *frame, viewport);
+
+    const sl::ResourceLifecycle lifecycle = in.cmdbuf != VK_NULL_HANDLE
+                                                ? sl::ResourceLifecycle::eOnlyValidNow
+                                                : sl::ResourceLifecycle::eValidUntilPresent;
+    sl::Resource hudless_res = MakeResource(in.hudless_color);
+    sl::Resource ui_res = MakeResource(in.ui_color_alpha);
+    sl::Resource depth_res = MakeResource(in.depth);
+    sl::Resource mvec_res = MakeResource(in.motion_vectors);
+
+    const sl::Extent hudless_ext{0, 0, in.hudless_color.extent.width,
+                                 in.hudless_color.extent.height};
+    const sl::Extent ui_ext{0, 0, in.ui_color_alpha.extent.width, in.ui_color_alpha.extent.height};
+    const sl::Extent depth_ext{0, 0, in.depth.extent.width, in.depth.extent.height};
+    const sl::Extent mvec_ext{0, 0, in.motion_vectors.extent.width,
+                              in.motion_vectors.extent.height};
+
+    std::array<sl::ResourceTag, 5> tags{
+        sl::ResourceTag{in.hudless_color.image ? &hudless_res : nullptr,
+                        sl::kBufferTypeHUDLessColor, lifecycle,
+                        in.hudless_color.image ? &hudless_ext : nullptr},
+        sl::ResourceTag{in.ui_color_alpha.image ? &ui_res : nullptr, sl::kBufferTypeUIColorAndAlpha,
+                        lifecycle, in.ui_color_alpha.image ? &ui_ext : nullptr},
+        sl::ResourceTag{in.depth.image ? &depth_res : nullptr, sl::kBufferTypeDepth, lifecycle,
+                        in.depth.image ? &depth_ext : nullptr},
+        sl::ResourceTag{in.motion_vectors.image ? &mvec_res : nullptr, sl::kBufferTypeMotionVectors,
+                        lifecycle, in.motion_vectors.image ? &mvec_ext : nullptr},
+        sl::ResourceTag{nullptr, sl::kBufferTypeBackbuffer,
+                        sl::ResourceLifecycle::eValidUntilPresent, nullptr},
+    };
+    uint32_t tag_count = 4u;
+    const sl::Extent backbuffer_ext{0, 0, in.backbuffer_extent.width, in.backbuffer_extent.height};
+    if (in.backbuffer_extent.width > 0 && in.backbuffer_extent.height > 0) {
+        tags[4] = sl::ResourceTag{nullptr, sl::kBufferTypeBackbuffer,
+                                  sl::ResourceLifecycle::eValidUntilPresent, &backbuffer_ext};
+        tag_count = 5u;
+    }
+
+    auto* const sl_cmdbuf = reinterpret_cast<sl::CommandBuffer*>(in.cmdbuf);
+    const sl::Result tag_res =
+        state.set_tag ? state.set_tag(viewport, tags.data(), tag_count, sl_cmdbuf)
+                      : state.set_tag_for_frame(*frame, viewport, tags.data(), tag_count, sl_cmdbuf);
+
+    if (!state.logged_first_dlssg_tag.exchange(true) || LogLevel() > 0) {
+        LOG_INFO(Render_Vulkan,
+                 "Streamline TagDLSSGInputs: frame={} const_res={} tag_res={} hudless={}x{} "
+                 "ui={}x{} depth={}x{} mvec={}x{}",
+                 in.frame_id, static_cast<int>(const_res), static_cast<int>(tag_res),
+                 in.hudless_color.extent.width, in.hudless_color.extent.height,
+                 in.ui_color_alpha.extent.width, in.ui_color_alpha.extent.height,
+                 in.depth.extent.width, in.depth.extent.height, in.motion_vectors.extent.width,
+                 in.motion_vectors.extent.height);
+    }
+    return const_res == sl::Result::eOk && tag_res == sl::Result::eOk;
+}
+
+bool TagDLSSGInputs(u32 frame_id, VkCommandBuffer cmdbuf, const DlssGImage& hudless_color,
+                    const DlssGImage& ui_color_alpha, const DlssGImage& depth,
+                    const DlssGImage& motion_vectors, bool reset) {
+    DlssGInputs inputs{};
+    inputs.frame_id = frame_id;
+    inputs.cmdbuf = cmdbuf;
+    inputs.hudless_color = hudless_color;
+    inputs.ui_color_alpha = ui_color_alpha;
+    inputs.depth = depth;
+    inputs.motion_vectors = motion_vectors;
+    inputs.reset = reset;
+    if (depth.extent.width > 0 && depth.extent.height > 0) {
+        inputs.camera_aspect_ratio =
+            static_cast<f32>(depth.extent.width) / static_cast<f32>(depth.extent.height);
+    }
+    return TagDLSSGInputs(inputs);
+}
+
 void Stop() {
     State& state = GetState();
     if (!state.started) {
         return;
     }
+    if (state.dlssg_enabled && state.dlssg_set_options) {
+        sl::DLSSGOptions off_options{};
+        off_options.mode = sl::DLSSGMode::eOff;
+        void(state.dlssg_set_options(sl::ViewportHandle{0u}, off_options));
+    }
     const sl::Result result = state.api.shutdown();
+    {
+        std::scoped_lock lock{state.token_mutex};
+        state.token_cache = {};
+    }
     state.started = false;
     state.attached = false;
+    state.reflex_available = false;
+    state.pcl_available = false;
+    state.dlssg_available = false;
+    state.dlssg_enabled = false;
+    state.dlssg_max_frames = 0;
+    state.dlssg_frames_to_generate = 0;
+    state.reflex_get_state = nullptr;
+    state.reflex_sleep = nullptr;
+    state.reflex_set_options = nullptr;
+    state.pcl_get_state = nullptr;
+    state.pcl_set_marker = nullptr;
+    state.pcl_set_options = nullptr;
+    state.dlssg_get_state = nullptr;
+    state.dlssg_set_options = nullptr;
+    state.logged_first_dlssg_tag.store(false);
     LOG_INFO(Render_Vulkan, "NVIDIA Streamline stopped (result {})", static_cast<int>(result));
 }
 
@@ -539,3 +975,5 @@ const Api& GetApi() {
 }
 
 } // namespace Vulkan::Streamline
+
+#endif // EGLANTINE_STREAMLINE

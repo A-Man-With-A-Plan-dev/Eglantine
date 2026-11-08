@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <vector>
 
@@ -18,6 +20,7 @@
 #include "video_core/renderer_vulkan/vk_present_manager.h"
 #include "video_core/renderer_vulkan/vk_scheduler.h"
 #include "video_core/renderer_vulkan/vk_swapchain.h"
+#include "video_core/vulkan_common/streamline.h"
 #include "video_core/vulkan_common/vulkan_device.h"
 #include "video_core/vulkan_common/vulkan_surface.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -32,6 +35,9 @@ constexpr u32 MAX_PRESENT_ATTEMPTS = 3;
 #ifdef HAS_LSFG
 static_assert(MAX_FRAMES_IN_FLIGHT <= LSFG_MAX_TARGETS);
 #endif
+
+std::atomic<u32> g_reflex_frame_counter{0};
+std::array<std::atomic<u32>, MAX_FRAMES_IN_FLIGHT> g_frame_reflex_id{};
 
 bool CanStoreToFrame(const vk::PhysicalDevice& physical_device, VkFormat format) {
 #ifdef HAS_LSFG
@@ -177,16 +183,26 @@ PresentManager::~PresentManager() = default;
 Frame* PresentManager::GetRenderFrame() {
 
     // Wait for free presentation frames
-    std::unique_lock lock{free_mutex};
-    free_cv.wait(lock, [this] { return !free_queue.empty(); });
+    Frame* frame = nullptr;
+    {
+        std::unique_lock lock{free_mutex};
+        free_cv.wait(lock, [this] { return !free_queue.empty(); });
 
-    // Take the frame from the queue
-    Frame* frame = free_queue.front();
-    free_queue.pop_front();
+        // Take the frame from the queue
+        frame = free_queue.front();
+        free_queue.pop_front();
+    }
 
     // Wait for the presentation to be finished so all frame resources are free
     frame->present_done.Wait();
     frame->present_done.Reset();
+
+    const u32 frame_id = ++g_reflex_frame_counter;
+    if (frame->index < g_frame_reflex_id.size()) {
+        g_frame_reflex_id[frame->index].store(frame_id, std::memory_order_relaxed);
+    }
+    Streamline::ReflexSleep(frame_id);
+    Streamline::Marker(sl::PCLMarker::eSimulationStart, frame_id);
 
     return frame;
 }
@@ -209,6 +225,12 @@ Frame* PresentManager::TryGetRenderFrame() {
 }
 
 void PresentManager::Present(Frame* frame) {
+    if (!frame->is_generated && frame->index < g_frame_reflex_id.size()) {
+        const u32 frame_id = g_frame_reflex_id[frame->index].load(std::memory_order_relaxed);
+        if (frame_id != 0) {
+            Streamline::Marker(sl::PCLMarker::eSimulationEnd, frame_id);
+        }
+    }
     if (use_present_thread) {
         scheduler.Record([this, frame](vk::CommandBuffer) {
             std::unique_lock lock{queue_mutex};
@@ -398,35 +420,53 @@ void PresentManager::PresentThread(std::stop_token token) {
                 has_last_real_arrival = true;
             }
 
-            // VRR half-period pacing: generated frame 0 presents immediately; subsequent generated
-            // frames in the same batch and the real frame that follows are spaced evenly across
-            // the smoothed base period outside both queue_mutex and swapchain_mutex.
+            // VRR multi-frame cadence pacing: generated frame 0 presents immediately; subsequent
+            // generated frames in the same batch (3x/4x) and the real frame that follows are
+            // spaced evenly across the smoothed base period outside both queue_mutex and
+            // swapchain_mutex. When native Streamline DLSS-G is enabled, bypass software hold so
+            // the Streamline hardware flip-metering pacer controls presentation cadence directly.
             Clock::time_point hold_until = now;
-            if (frame->is_generated) {
-                if (frame->generation_index > 0 && has_pending_generated) {
-                    const u32 total_steps = std::max<u32>(1u, frame->generation_count) + 1u;
+            if (!Streamline::IsDlssGEnabled()) {
+                if (frame->is_generated) {
+                    if (frame->generation_index > 0 && has_pending_generated) {
+                        const u32 total_steps = std::max<u32>(1u, frame->generation_count) + 1u;
+                        const s64 offset_us = static_cast<s64>(
+                            smoothed_base_period_us * static_cast<double>(frame->generation_index) /
+                            static_cast<double>(total_steps));
+                        hold_until = last_generated_present + std::chrono::microseconds(offset_us);
+                    }
+                } else if (has_pending_generated) {
+                    const u32 total_steps = std::max<u32>(1u, pending_generation_count) + 1u;
                     const s64 offset_us = static_cast<s64>(
-                        smoothed_base_period_us * static_cast<double>(frame->generation_index) /
+                        smoothed_base_period_us * static_cast<double>(pending_generation_count) /
                         static_cast<double>(total_steps));
                     hold_until = last_generated_present + std::chrono::microseconds(offset_us);
+                    has_pending_generated = false;
                 }
-            } else if (has_pending_generated) {
-                const u32 total_steps = std::max<u32>(1u, pending_generation_count) + 1u;
-                const s64 offset_us = static_cast<s64>(
-                    smoothed_base_period_us * static_cast<double>(pending_generation_count) /
-                    static_cast<double>(total_steps));
-                hold_until = last_generated_present + std::chrono::microseconds(offset_us);
+            } else {
                 has_pending_generated = false;
             }
 
-            if (now < hold_until && present_queue.empty() && !wake_present_hold) {
+            // In a multi-frame batch (N generated frames + 1 real frame queued together),
+            // present_queue legitimately holds the remaining frames of the current batch:
+            // (generation_count - generation_index) when frame->is_generated, or 0 for the real
+            // frame. Only cancel the hold if a newer batch has arrived behind this batch.
+            const size_t expected_same_batch_remaining =
+                (frame->is_generated && frame->generation_count >= frame->generation_index)
+                    ? static_cast<size_t>(frame->generation_count - frame->generation_index)
+                    : 0u;
+            if (now < hold_until && present_queue.size() <= expected_same_batch_remaining &&
+                !wake_present_hold) {
                 const auto coarse_deadline = hold_until - std::chrono::microseconds(1000);
                 if (now < coarse_deadline) {
-                    frame_cv.wait_until(lock, token, coarse_deadline, [this] {
-                        return !present_queue.empty() || wake_present_hold;
-                    });
+                    frame_cv.wait_until(
+                        lock, token, coarse_deadline, [this, expected_same_batch_remaining] {
+                            return present_queue.size() > expected_same_batch_remaining ||
+                                   wake_present_hold;
+                        });
                 }
-                if (!token.stop_requested() && present_queue.empty() && !wake_present_hold &&
+                if (!token.stop_requested() &&
+                    present_queue.size() <= expected_same_batch_remaining && !wake_present_hold &&
                     Clock::now() < hold_until) {
                     lock.unlock();
                     while (Clock::now() < hold_until && !token.stop_requested()) {
@@ -705,7 +745,14 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
         .pSignalSemaphores = &render_semaphore,
     };
 
+    const u32 frame_id = (!frame->is_generated && frame->index < g_frame_reflex_id.size())
+                             ? g_frame_reflex_id[frame->index].load(std::memory_order_relaxed)
+                             : 0u;
+
     // Submit the image copy/blit to the swapchain
+    if (frame_id != 0) {
+        Streamline::Marker(sl::PCLMarker::eRenderSubmitStart, frame_id);
+    }
     {
         std::scoped_lock submit_lock{scheduler.submit_mutex};
         switch (const VkResult result =
@@ -720,9 +767,17 @@ void PresentManager::CopyToSwapchainImpl(Frame* frame) {
             break;
         }
     }
+    if (frame_id != 0) {
+        Streamline::Marker(sl::PCLMarker::eRenderSubmitEnd, frame_id);
+        Streamline::Marker(sl::PCLMarker::ePresentStart, frame_id);
+    }
 
     // Present
     swapchain.Present(render_semaphore);
+
+    if (frame_id != 0) {
+        Streamline::Marker(sl::PCLMarker::ePresentEnd, frame_id);
+    }
 }
 
 } // namespace Vulkan
