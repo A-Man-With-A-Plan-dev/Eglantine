@@ -67,6 +67,8 @@ DmaPusher::DmaPusher(Core::System& system_, MemoryManager& memory_manager_, Cont
 DmaPusher::~DmaPusher() = default;
 
 void DmaPusher::DispatchCalls() {
+    front_macro_call_on = VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::FrontMacroCall) &&
+                          VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::MacroBorrow);
     // The sub-index is kept: a channel suspended on a semaphore resumes inside its command list.
     dma_state.is_last_call = true;
     while (system.IsPoweredOn()) {

@@ -1791,7 +1791,7 @@ private:
         // run_ahead_ledger (measurement only): compares the last frame's pages and arms the
         // back's set swap for this fence, before the wait and outside its timing.
         const bool ledger = VideoCommon::Nx2Ledger::On();
-        if (ledger) [[unlikely]] {
+        if (ledger && frames_ahead == 0) [[unlikely]] {
             LedgerEnter(~w[22], w[24]);
         }
         const auto entered = std::chrono::steady_clock::now();
@@ -1807,6 +1807,7 @@ private:
         // host syncpoint value (its downloads and reports in guest memory), not only its guest one.
         LandedLane landed_lane = LandedLane::None;
         bool inflight_epoch = false;
+        bool ran_ahead = false;
         const u32 previous_fence_id = m_previous_fence_id;
         const u32 previous_fence_value = m_previous_fence_value;
         if (frames_ahead == 1 || (frames_ahead == -1 && !WaitForFrame(~w[22], w[24], true))) {
@@ -1856,11 +1857,23 @@ private:
                 }
             }
             if (wait_for_this) {
+                if (ledger && previous_fence_id < 192) [[unlikely]] {
+                    m_ledger->Take(previous_fence_id, previous_fence_value,
+                                   [this](u64 address) -> const u8* {
+                                       return system.Host1x().MemoryManager().GetPointer<u8>(address);
+                                   });
+                }
+                if (ledger) [[unlikely]] {
+                    LedgerEnter(~w[22], w[24]);
+                }
                 WaitForFrame(~w[22], w[24]);
-            } else if (frames_ahead == 1 && VideoCommon::Nx2Inflight::Any()) [[unlikely]] {
-                // inflight_write_wait / inflight_read_exact: the epoch opens right before the
-                // reply, after this thread's own writes below.
-                inflight_epoch = true;
+            } else {
+                ran_ahead = true;
+                if (frames_ahead == 1 && VideoCommon::Nx2Inflight::Any()) [[unlikely]] {
+                    // inflight_write_wait / inflight_read_exact: the epoch opens right before the
+                    // reply, after this thread's own writes below.
+                    inflight_epoch = true;
+                }
             }
         } else if (frames_ahead == 0) {
             WaitForFrame(~w[22], w[24]);
@@ -1883,11 +1896,18 @@ private:
         if (Timeline::On()) [[unlikely]] {
             Timeline::guest_wait_entered_ns.store(0, std::memory_order_relaxed);
         }
-        if (ledger && ~w[22] < 192) [[unlikely]] {
-            // The back is done with this frame: hash the pages it read for it.
-            m_ledger->Take(~w[22], w[24], [this](u64 address) -> const u8* {
-                return system.Host1x().MemoryManager().GetPointer<u8>(address);
-            });
+        if (ledger) [[unlikely]] {
+            const u32 done_id = ran_ahead ? previous_fence_id : ~w[22];
+            const u32 done_value = ran_ahead ? previous_fence_value : w[24];
+            if (done_id < 192) {
+                // The back is done with the waited frame: hash the pages it read for it.
+                m_ledger->Take(done_id, done_value, [this](u64 address) -> const u8* {
+                    return system.Host1x().MemoryManager().GetPointer<u8>(address);
+                });
+            }
+            if (ran_ahead) {
+                LedgerEnter(~w[22], w[24]);
+            }
         }
         // war_guard_probe (measurement only): from here the guest may touch this frame's data.
         const bool war_probe =

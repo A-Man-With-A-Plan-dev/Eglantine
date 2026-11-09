@@ -360,7 +360,11 @@ inline std::string Report(size_t frames, u64 unarmed_changed,
 namespace VideoCommon::Nx2Snap {
 /// Opt-in runtime page-snapshot overlay mode (run_ahead_overlay / EDEN_NX2_RUN_AHEAD_OVERLAY=1, off by default).
 inline bool OverlayOn() {
-    return Nx2Perf::On(Nx2Perf::Opt::RunAheadOverlay);
+    return Nx2Perf::On(Nx2Perf::Opt::RunAheadOverlay) ||
+           (Nx2Perf::On(Nx2Perf::Opt::FramesAhead) &&
+            !Nx2Perf::On(Nx2Perf::Opt::RunAheadLedger) &&
+            !Nx2Perf::On(Nx2Perf::Opt::RunAheadCowProbe) &&
+            !Nx2Perf::On(Nx2Perf::Opt::RunAheadSnapshotProbe));
 }
 /// Set once the overlay's pool and tables exist; hot-path read hooks test it first.
 inline std::atomic<bool> g_overlay{false};
@@ -2070,14 +2074,17 @@ inline void FrontIncrement(u32 id) {
     if (id >= NumIds) {
         return;
     }
+    const bool cow_on = On();
     if (t_role == Role::None) {
-        EnsureInit();
         t_role = Role::Front;
+    }
+    if (cow_on && (Nx2Ledger::g_note & Nx2Ledger::NoteCow) == 0) [[unlikely]] {
+        EnsureInit();
         Nx2Ledger::g_note |= Nx2Ledger::NoteCow;
     }
     State& s = Get();
     s.front_count[id].fetch_add(1, std::memory_order_acq_rel);
-    if (t_role == Role::Front && t_before && Passed(Role::Front)) {
+    if (cow_on && t_role == Role::Front && t_before && Passed(Role::Front)) {
         t_before = false;
     }
 }
@@ -5177,10 +5184,8 @@ public:
             }
         }
         const u32 union_pages = t.used_count;
-        if (probe) {
-            for (size_t i = 0; i < arm_count; ++i) {
-                t.Insert((*arm)[i], FromArmSet);
-            }
+        for (size_t i = 0; i < arm_count; ++i) {
+            t.Insert((*arm)[i], FromArmSet);
         }
         const s64 built = probe ? NowNs() : 0;
         s64 budget_ns = 0;

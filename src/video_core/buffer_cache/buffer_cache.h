@@ -1714,12 +1714,15 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
                     const u64 page_offset = cur_addr & Core::DEVICE_PAGEMASK;
                     const u32 chunk_size = static_cast<u32>((std::min<u64>)(
                         Core::DEVICE_PAGESIZE - page_offset, check_size - offset_in_bank));
-                    const u8* const ptr = contiguous
-                                              ? (base_ptr + offset_in_bank)
-                                              : device_memory.template GetPointer<u8>(cur_addr);
-                    if (ptr == nullptr) {
+                    const u8* const raw_ptr = contiguous
+                                                  ? (base_ptr + offset_in_bank)
+                                                  : device_memory.template GetPointer<u8>(cur_addr);
+                    if (raw_ptr == nullptr) {
                         break;
                     }
+                    const u8* const ptr = Nx2Snap::OverlayActive()
+                                              ? Nx2Snap::OverlayPointer(cur_addr, raw_ptr)
+                                              : raw_ptr;
                     Nx2Ledger::Note(cur_addr, chunk_size);
                     const u32 page_bit = 1U << (page_idx & 31);
                     const bool page_initialized = (shadow->initialized_mask & page_bit) != 0;
@@ -1816,6 +1819,9 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
                 }
                 if (dirty_skip) [[unlikely]] {
                     Nx2BankDirty::EndPass(shadow->dirty, frame_tick);
+                    if (Nx2Snap::OverlayActive()) {
+                        shadow->dirty.force = true;
+                    }
                 }
             }
         } else if (dirty_skip) [[unlikely]] {
@@ -3249,7 +3255,7 @@ bool BufferCache<P>::SynchronizeBuffer(Buffer& buffer, DAddr device_addr, u32 si
         }
     }
     const auto note_synced_range = [&]() {
-        if (native_indirect_uniform_draw_ticket == 0) {
+        if (native_indirect_uniform_draw_ticket == 0 || Nx2Snap::OverlayActive()) {
             return;
         }
         for (u32 i = 0; i < last_synced_count; ++i) {
@@ -3367,10 +3373,11 @@ void BufferCache<P>::ImmediateUploadMemory([[maybe_unused]] Buffer& buffer,
                                            [[maybe_unused]] std::span<const BufferCopy> copies) {
     if constexpr (!USE_MEMORY_MAPS_FOR_UPLOADS) {
         std::span<u8> immediate_buffer;
+        const bool overlay_active = Nx2Snap::OverlayActive();
         for (const BufferCopy& copy : copies) {
             std::span<const u8> upload_span;
             const DAddr device_addr = buffer.CpuAddr() + copy.dst_offset;
-            if (IsRangeGranular(device_addr, copy.size)) {
+            if (!overlay_active && IsRangeGranular(device_addr, copy.size)) {
                 auto* const ptr = device_memory.GetPointer<u8>(device_addr);
                 if (ptr != nullptr) {
                     upload_span = std::span(ptr, copy.size);
@@ -3381,6 +3388,9 @@ void BufferCache<P>::ImmediateUploadMemory([[maybe_unused]] Buffer& buffer,
                 }
                 device_memory.ReadBlockUnsafe(device_addr, immediate_buffer.data(), copy.size);
                 upload_span = immediate_buffer.subspan(0, copy.size);
+                if (overlay_active) {
+                    memory_tracker.MarkRegionAsCpuModified(device_addr, copy.size);
+                }
             }
             buffer.ImmediateUpload(copy.dst_offset, upload_span);
         }
@@ -3394,10 +3404,14 @@ void BufferCache<P>::MappedUploadMemory([[maybe_unused]] Buffer& buffer,
     if constexpr (USE_MEMORY_MAPS) {
         auto upload_staging = runtime.UploadStagingBuffer(total_size_bytes);
         const std::span<u8> staging_pointer = upload_staging.mapped_span;
+        const bool overlay_active = Nx2Snap::OverlayActive();
         for (BufferCopy& copy : copies) {
             u8* const src_pointer = staging_pointer.data() + copy.src_offset;
             const DAddr device_addr = buffer.CpuAddr() + copy.dst_offset;
             device_memory.ReadBlockUnsafe(device_addr, src_pointer, copy.size);
+            if (overlay_active) {
+                memory_tracker.MarkRegionAsCpuModified(device_addr, copy.size);
+            }
             // Large uploads are mostly geometry the host GPU now has its own copy of: TickFrame
             // marks their guest memory cold (see TextureCache::RefreshContents).
             if (copy.size >= 256_KiB) {
@@ -3833,8 +3847,9 @@ TextureBufferBinding BufferCache<P>::GetTextureBufferBinding(GPUVAddr gpu_addr, 
 template <class P>
 std::span<const u8> BufferCache<P>::ImmediateBufferWithData(DAddr device_addr, size_t size) {
     u8* const base_pointer = device_memory.GetPointer<u8>(device_addr);
-    if (IsRangeGranular(device_addr, size) ||
-        base_pointer + size == device_memory.GetPointer<u8>(device_addr + size)) {
+    if (!Nx2Snap::OverlayActive() &&
+        (IsRangeGranular(device_addr, size) ||
+         base_pointer + size == device_memory.GetPointer<u8>(device_addr + size))) {
         return std::span(base_pointer, size);
     } else {
         const std::span<u8> span = ImmediateBuffer(size);

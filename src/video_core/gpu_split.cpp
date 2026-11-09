@@ -1174,6 +1174,7 @@ void GpuSplit::ReportLazySkip(const char* where) const {
 void GpuSplit::BackLoop(std::stop_token stop_token) {
     Common::SetCurrentThreadName("GPUBack");
     on_back_thread = true;
+    Nx2Cow::t_role = Nx2Cow::Role::Back;
     Nx2Snap::t_gpu_own = true; // run_ahead_own_write_probe / run_ahead_overlay: the back's writes are GPU writes
     Nx2Ledger::StartBackThread();
     back_running.store(true, std::memory_order_release);
@@ -1188,7 +1189,16 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
 #endif
     u64 read_position = 0;
     const bool handoff_counters = HandoffCounters();
+    Nx2Perf::OffMask cached_off_mask = Nx2Perf::CurrentOffMask();
     while (!stop_token.stop_requested()) {
+        if (const auto cur_mask = Nx2Perf::CurrentOffMask();
+            cur_mask.lo != cached_off_mask.lo || cur_mask.hi != cached_off_mask.hi) [[unlikely]] {
+            cached_off_mask = cur_mask;
+            spin_handoff = Nx2Perf::On(Nx2Perf::Opt::SpinHandoff);
+            back_replay_lean = Nx2Perf::On(Nx2Perf::Opt::BackReplayLean);
+            eager_publish = Nx2Perf::On(Nx2Perf::Opt::EagerPublish);
+            release_before_hook = Nx2Perf::On(Nx2Perf::Opt::ReleaseBeforeHook);
+        }
         Nx2Ledger::SyncBackThread();
         Nx2Profile::Report("GPU back thread");
         u64 available = published.load(std::memory_order_acquire);

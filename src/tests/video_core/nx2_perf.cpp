@@ -1135,6 +1135,9 @@ TEST_CASE("Nx2Perf runtime Set and SetOffMask toggle every switch live", "[nx2_p
         const bool was_on = On(opt);
         Set(opt, !was_on, "test");
         REQUIRE(On(opt) == !was_on);
+        if (opt == Opt::FramesAhead && !was_on) {
+            REQUIRE(On(Opt::RunAheadOverlay));
+        }
         Set(opt, was_on, "test");
         REQUIRE(On(opt) == was_on);
     }

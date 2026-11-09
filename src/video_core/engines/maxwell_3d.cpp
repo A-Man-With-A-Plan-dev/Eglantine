@@ -1222,6 +1222,7 @@ struct Maxwell3D::FrontState {
     u64 dead_store_writes{};
     u64 dead_store_claims_full{};
     s64 dead_store_report_ns{};
+    VideoCommon::Nx2Perf::OffMask cached_off_mask{1ULL, 1ULL};
 };
 
 namespace {
@@ -1233,7 +1234,7 @@ bool FrontVerifyEnabled() {
     return verify;
 }
 
-// The front macro switches (Nx2Perf), read once.
+// The front macro switches (Nx2Perf), refreshed when the live mask changes.
 struct FrontMacroSwitches {
     bool batch;
     bool borrow;
@@ -1243,8 +1244,14 @@ struct FrontMacroSwitches {
 const FrontMacroSwitches& FrontMacroOptions() {
     using VideoCommon::Nx2Perf::On;
     using VideoCommon::Nx2Perf::Opt;
-    static const FrontMacroSwitches switches{On(Opt::MacroBatch), On(Opt::MacroBorrow),
-                                             On(Opt::MacroState), VideoCommon::Nx2Perf::Verify()};
+    static thread_local FrontMacroSwitches switches{};
+    static thread_local VideoCommon::Nx2Perf::OffMask cached_mask{1ULL, 1ULL};
+    const auto cur_mask = VideoCommon::Nx2Perf::CurrentOffMask();
+    if (cached_mask.lo != cur_mask.lo || cached_mask.hi != cur_mask.hi) [[unlikely]] {
+        cached_mask = cur_mask;
+        switches = FrontMacroSwitches{On(Opt::MacroBatch), On(Opt::MacroBorrow),
+                                      On(Opt::MacroState), VideoCommon::Nx2Perf::Verify()};
+    }
     return switches;
 }
 
@@ -1640,6 +1647,35 @@ Maxwell3D::FrontState& Maxwell3D::Front(Core::System& system, VideoCommon::GpuSp
         executing_macro = 0;
         front_macros = true;
     }
+    const auto cur_mask = VideoCommon::Nx2Perf::CurrentOffMask();
+    if (front->cached_off_mask.lo != cur_mask.lo || front->cached_off_mask.hi != cur_mask.hi)
+        [[unlikely]] {
+        front->cached_off_mask = cur_mask;
+        using VideoCommon::Nx2Perf::On;
+        using VideoCommon::Nx2Perf::Opt;
+        front->same_first = On(Opt::FrontSameFirst);
+        front->class_table = On(Opt::FrontClassTable);
+        front->writer_set_exec = On(Opt::WriterSetExec);
+        front->draw_begin_coalesce = On(Opt::DrawBeginCoalesce);
+        front->verify = VideoCommon::Nx2Perf::Verify();
+        front->exec_same_drop = On(Opt::ExecSameDrop);
+        front->macro_call = On(Opt::FrontMacroCall);
+        front->dma_forward = On(Opt::DmaForward);
+        front->dma_forward_tape = On(Opt::DmaForwardTape);
+        front->dma_forward_memo = On(Opt::DmaForwardMemo);
+        front->macro_memo_on = On(Opt::FrontMacroMemo);
+        front->macro_options = &FrontMacroOptions();
+        if (On(Opt::StateDeadStore)) {
+            if (!front->dead_store) {
+                front->dead_store = std::make_unique<VideoCommon::DeadStoreSlot[]>(Regs::NUM_REGS);
+            }
+            if (front->verify) {
+                split.SetFoldEngine(this);
+            }
+        } else if (front->dead_store) {
+            front->dead_store.reset();
+        }
+    }
     return *front;
 }
 
@@ -1856,7 +1892,7 @@ void Maxwell3D::FrontWrite(VideoCommon::GpuSplit& split, FrontState& fs, u32 met
         method == MAXWELL3D_REG_INDEX(sync_info)) [[unlikely]] {
         VideoCommon::Nx2Perf::FenceTimeline::StampFront(value & 0xffff); // sync_info.sync_point
     }
-    if (method == MAXWELL3D_REG_INDEX(sync_info) && VideoCommon::Nx2Cow::On()) [[unlikely]] {
+    if (method == MAXWELL3D_REG_INDEX(sync_info)) [[unlikely]] {
         VideoCommon::Nx2Cow::FrontIncrement(value & 0xffff); // run_ahead_cow_probe boundary
     }
     const u8 cls = fs.class_table ? FrontClass(method, fs.verify) : u8{0};
@@ -2220,11 +2256,9 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
             return address == MAXWELL3D_REG_INDEX(render_enable.mode);
         };
         // dma_forward_tape: the back evaluates a recorded tape instead of re-running the call.
-        const bool tape_on = fs.macro_call ? fs.dma_forward_tape : [] {
-            static const bool on =
-                VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::DmaForwardTape);
-            return on;
-        }();
+        const bool tape_on =
+            fs.macro_call ? fs.dma_forward_tape
+                          : VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::DmaForwardTape);
         const auto analyze = [&](auto&& read) {
             if (tape_on) {
                 return DmaForward::Analyze<true>(
@@ -2679,11 +2713,9 @@ void Maxwell3D::FrontRunMacro(Core::System& system, VideoCommon::GpuSplit& split
         // RAM and no MME DMA (front_macro_memo.h). With PERF_VERIFY a hit runs the JIT anyway
         // and compares its emits with the entry's.
         namespace MacroMemo = VideoCommon::FrontMacroMemo;
-        const bool macro_memo_on = fs.macro_call ? fs.macro_memo_on : [] {
-            static const bool on =
-                VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::FrontMacroMemo);
-            return on;
-        }();
+        const bool macro_memo_on =
+            fs.macro_call ? fs.macro_memo_on
+                          : VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::FrontMacroMemo);
         bool replayed = false;
         bool record = false;
         const MacroMemo::Entry* check = nullptr;
@@ -3672,6 +3704,9 @@ size_t Maxwell3D::BackRun(Core::System& system, const u64* entry, size_t words,
     constexpr u32 cb_data = MAXWELL3D_REG_INDEX(const_buffer.buffer);
     const bool verify = VideoCommon::Nx2Perf::Verify();
     const bool cb_batch = VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::CbBatch);
+    fast_maxwell3d = VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::Method) &&
+                     !record_write_history && !g_trace_first_method_writes &&
+                     !VideoCommon::Nx2Profile::Enabled();
     // Classify leaves out macro methods and SET_SHADOW_RAM_CONTROL, so CallMethod would take
     // CallMethodFast whenever these hold (and executing_macro is 0).
     const bool front_release = front_macros && !VideoCommon::GpuSplit::OnBackThread();

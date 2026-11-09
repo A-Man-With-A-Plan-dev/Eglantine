@@ -267,6 +267,9 @@ void Set(Opt opt, bool on, std::string_view label) {
     OffMask mask = CurrentOffMask();
     if (on) {
         mask &= ~Bit(opt);
+        if (opt == Opt::FramesAhead) {
+            mask &= ~Bit(Opt::RunAheadOverlay);
+        }
     } else {
         mask |= Bit(opt);
     }

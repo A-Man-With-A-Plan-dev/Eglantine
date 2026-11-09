@@ -2973,10 +2973,7 @@ void RasterizerVulkan::FlushWork() {
     // picks another mask for the A/B. Full chunks still dispatch on their own.
     static constexpr u32 BATCH_CHECK_MASK = 127;
     static_assert(DRAWS_TO_DISPATCH % (BATCH_CHECK_MASK + 1) == 0);
-    static const u32 batch_check_mask = [] {
-        if (!VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::DispatchBatch)) {
-            return CHECK_MASK;
-        }
+    static const u32 configured_batch_check_mask = [] {
         const char* value = std::getenv("EDEN_NX2_DISPATCH_MASK");
         if (value == nullptr || value[0] < '0' || value[0] > '9') {
             return BATCH_CHECK_MASK;
@@ -2991,7 +2988,10 @@ void RasterizerVulkan::FlushWork() {
         return static_cast<u32>(parsed);
     }();
     const u32 check_mask =
-        Tegra::g_nx2_ampere.load(std::memory_order_relaxed) ? batch_check_mask : CHECK_MASK;
+        (Tegra::g_nx2_ampere.load(std::memory_order_relaxed) &&
+         VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::DispatchBatch))
+            ? configured_batch_check_mask
+            : CHECK_MASK;
     if ((++draw_counter & check_mask) != 0) {
         return;
     }
