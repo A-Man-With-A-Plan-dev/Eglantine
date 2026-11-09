@@ -10,7 +10,13 @@ BUILD_DIR="$CACHE_ROOT/build-linux"
 TOOLS_DIR="$CACHE_ROOT/tools"
 STAMP_FILE="$CACHE_ROOT/.deps-installed-v1"
 
-mkdir -p "$CACHE_ROOT" "$BUILD_DIR" "$TOOLS_DIR"
+export CCACHE_DIR="$CACHE_ROOT/ccache"
+export CCACHE_BASEDIR="$REPO_WIN"
+export CCACHE_COMPILERCHECK=content
+export CCACHE_NOHASHDIR=true
+export CCACHE_MAXSIZE=5G
+
+mkdir -p "$CACHE_ROOT" "$BUILD_DIR" "$TOOLS_DIR" "$CCACHE_DIR"
 
 if [[ ! -f "$STAMP_FILE" ]]; then
     echo "[WSL2] Installing Linux build dependencies (one-time setup)..."
@@ -44,7 +50,7 @@ if [[ ! -f "$BUILD_DIR/build.ninja" ]]; then
         -DCMAKE_BUILD_TYPE=Release \
         -DBUILD_TESTING=OFF \
         -DYUZU_TESTS=OFF \
-        -DYUZU_CMD=ON \
+        -DYUZU_CMD=OFF \
         -DYUZU_ROOM=OFF \
         -DYUZU_ROOM_STANDALONE=OFF \
         -DYUZU_USE_BUNDLED_QT=OFF \
@@ -58,15 +64,15 @@ if [[ ! -f "$BUILD_DIR/build.ninja" ]]; then
         -DNIGHTLY_BUILD=ON
 fi
 
-echo "[WSL2] Building eglantine and eden-cli with $(nproc) threads..."
-cmake --build "$BUILD_DIR" --target yuzu yuzu-cmd --parallel "$(nproc)"
+echo "[WSL2] Building eglantine (yuzu) with $(nproc) threads..."
+cmake --build "$BUILD_DIR" --target yuzu --parallel "$(nproc)"
 ccache --show-stats || true
 
-strip "$BUILD_DIR/bin/eglantine" "$BUILD_DIR/bin/eden-cli"
+strip "$BUILD_DIR/bin/eglantine"
 
 echo "[WSL2] Packaging eglantine-linux-x86_64.tar.gz..."
 tar -czf "$REPO_WIN/build/eglantine-linux-x86_64.tar.gz" \
-    -C "$BUILD_DIR/bin" eglantine eden-cli
+    -C "$BUILD_DIR/bin" eglantine
 
 echo "[WSL2] Packaging eglantine-linux-x86_64.AppImage..."
 APPDIR="$CACHE_ROOT/AppDir"
@@ -85,7 +91,6 @@ export ARCH=x86_64
 
 "$TOOLS_DIR/linuxdeploy-x86_64.AppImage" --appdir "$APPDIR" \
     --executable "$BUILD_DIR/bin/eglantine" \
-    --executable "$BUILD_DIR/bin/eden-cli" \
     --desktop-file "$REPO_WIN/dist/dev.eglantine.eglantine.desktop" \
     --icon-file "$ICON" \
     --plugin qt \
