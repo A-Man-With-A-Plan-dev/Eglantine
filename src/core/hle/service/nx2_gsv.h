@@ -2741,7 +2741,13 @@ private:
             }
             return now - suspended_since > suspended_limit;
         };
-        if (VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::PresentGuestWait)) {
+        // Ocarina only: with core 3 free during the wait, Mario Kart World's worker threads ran
+        // ahead and rewrote command memory the GPU thread had not read yet (channels suspended on
+        // a semaphore the game writes after the present, then a render target format of 1.0f and
+        // the surface assert). The host wake-up parks core 3, which serialises them.
+        constexpr u64 OcarinaOfTimeProgramId = 0x0400486024DEC000ULL;
+        if (VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::PresentGuestWait) &&
+            system.GetApplicationProcessProgramID() == OcarinaOfTimeProgramId) {
             // Sleep this service thread in the guest kernel, as PaceToVblank does: it runs on
             // guest core 3, and a host wait held that core and its game threads for the whole wait.
             guest_waited = true;

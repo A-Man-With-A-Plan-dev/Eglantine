@@ -186,9 +186,11 @@ inline constexpr OffMask DefaultOffMask() {
 /// front_macro_call (-0.1 FPS; round 13).
 /// dma_forward and draw_begin_coalesce (round 5), pending_wake (round 9) and diag_draw_lite
 /// (round 11) are on by default; SAFE turns them off.
-/// present_guest_wait is on by default since 2026-11-09 (+10 FPS in OoT: core 3's game threads
-/// run during the present wait); a wait past 50 ms falls back to the host wake-up, the path the
-/// one observed guest panic at a scene load never took. SAFE turns it off.
+/// present_guest_wait is on by default since 2026-11-09 and acts on Ocarina of Time only (+10
+/// FPS: core 3's game threads run during the present wait); a wait past 50 ms falls back to the
+/// host wake-up. Mario Kart World with the napping wait ran its workers ahead of the GPU thread
+/// (semaphore stall, then a corrupt render target format): other titles keep the host wake-up.
+/// SAFE turns it off.
 inline constexpr OffMask always_off = Bit(Opt::SplitOverlap) | Bit(Opt::AcquireEarly) |
                                   Bit(Opt::DispatchBatch) | Bit(Opt::MacroReadOverlayWriters) |
                                   Bit(Opt::GpuCorePin) |
