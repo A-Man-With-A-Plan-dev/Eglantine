@@ -2725,10 +2725,19 @@ private:
             guest_waited = true;
             bool terminated = false;
             bool gpu_waited = false;
+            bool fell_back = false;
             u32 last_syncpoint = syncpoints.GetGuestSyncpointValue(fence_id);
             constexpr s64 slice_ns = 100'000;
+            // Frame waits end within a few ms. A wait this long is a scene load (shader builds,
+            // asset uploads): finish it on the host wake-up below, the path those always took.
+            constexpr auto guest_wait_limit = std::chrono::milliseconds{50};
             while (!syncpoints.IsReadyGuest(fence_id, fence_value) && system.IsPoweredOn() &&
                    std::chrono::steady_clock::now() < deadline) {
+                if (std::chrono::steady_clock::now() - start > guest_wait_limit) {
+                    fell_back = true;
+                    guest_waited = false;
+                    break;
+                }
                 if (unless_gpu_waits) {
                     gpu_waited |= system.GPU().HasSuspendedChannels();
                     if (gpu_waited &&
@@ -2751,7 +2760,7 @@ private:
                     break;
                 }
             }
-            if (VideoCommon::Nx2Perf::Verify() && !terminated &&
+            if (VideoCommon::Nx2Perf::Verify() && !terminated && !fell_back &&
                 !syncpoints.IsReadyGuest(fence_id, fence_value) && system.IsPoweredOn() &&
                 std::chrono::steady_clock::now() < deadline) {
                 static std::atomic<u64> mismatches{};

@@ -411,7 +411,6 @@ inline constexpr OffMask DefaultOffMask() {
                           Opt::DispatchBatch, Opt::PipelineFastCache, Opt::DrawPreamble,
                           Opt::BindMemo, Opt::MacroReadOverlayWriters,
                           Opt::SubmitWhileWaited, Opt::GpuCorePin, Opt::PresentOneAhead,
-                          Opt::PresentGuestWait,
                           Opt::ReleaseBeforeHook,
                           Opt::AcquireTriggerEarly,
                           Opt::WriterSetExec, Opt::ExactNotedWrites, Opt::GuestCcd, Opt::DmaForward,
@@ -455,7 +454,7 @@ inline constexpr OffMask DefaultOffMask() {
 /// reads see "not met" where a drain sees "met", so channels wait up to 2 ms longer);
 /// dispatch_batch (delays GPU work; suspected of the flashes, no verify mode);
 /// macro_read_overlay_writers (+0.3 FPS, noise); gpu_core_pin (pair -2.3 FPS, separate +0.4);
-/// present_guest_wait (guest panic at load in a speed run); present_one_ahead (+9 FPS, but the
+/// present_one_ahead (+9 FPS, but the
 /// guest rewrites constants the back has not read yet: incessant brightness flashes in play);
 /// frames_ahead (same hazard: the lab's flash check sees 25-40% of frames at another brightness
 /// with it on, 0 with it off; ~5 ms/frame slower at the Kokiri spawn without it);
@@ -481,9 +480,12 @@ inline constexpr OffMask DefaultOffMask() {
 /// front_macro_call (-0.1 FPS; round 13).
 /// dma_forward and draw_begin_coalesce (round 5), pending_wake (round 9) and diag_draw_lite
 /// (round 11) are on by default; SAFE turns them off.
+/// present_guest_wait is on by default since 2026-11-09 (+10 FPS in OoT: core 3's game threads
+/// run during the present wait); a wait past 50 ms falls back to the host wake-up, the path the
+/// one observed guest panic at a scene load never took. SAFE turns it off.
 inline constexpr OffMask always_off = Bit(Opt::SplitOverlap) | Bit(Opt::AcquireEarly) |
                                   Bit(Opt::DispatchBatch) | Bit(Opt::MacroReadOverlayWriters) |
-                                  Bit(Opt::GpuCorePin) | Bit(Opt::PresentGuestWait) |
+                                  Bit(Opt::GpuCorePin) |
                                   Bit(Opt::PresentOneAhead) | Bit(Opt::FramesAhead) |
                                   Bit(Opt::ReleaseBeforeHook) |
                                   Bit(Opt::AcquireTriggerEarly) |
