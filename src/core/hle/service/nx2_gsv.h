@@ -1815,7 +1815,9 @@ private:
         bool ran_ahead = false;
         const u32 previous_fence_id = m_previous_fence_id;
         const u32 previous_fence_value = m_previous_fence_value;
+        bool suspended_here = false;
         if (frames_ahead == 1 || (frames_ahead == -1 && !WaitForFrame(~w[22], w[24], true))) {
+            suspended_here = frames_ahead == -1;
             LOG_DEBUG(Service, "nx2:vi2 present #{} fence ({}, {:#x}), waiting for ({}, {:#x}); now {:#x}",
                       m_presents, ~w[22], w[24], m_previous_fence_id, m_previous_fence_value,
                       ~w[22] < 192 ? system.Host1x().GetSyncpointManager().GetGuestSyncpointValue(~w[22]) : 0U);
@@ -1837,7 +1839,9 @@ private:
                 landed_lane = LandedLane::PrevAlways;
                 ++m_stats.landed_lag;
             }
-            WaitForFrame(m_previous_fence_id, m_previous_fence_value);
+            // A suspended channel brought us here: the previous frame cannot finish either
+            // before this present returns, so that wait gives up the same way.
+            WaitForFrame(m_previous_fence_id, m_previous_fence_value, suspended_here);
             // present_one_ahead: commands run from the submit-time pushbuffer snapshot, so the
             // previous frame's wait alone keeps the game at most one frame ahead of the back.
             bool wait_for_this = gpu_behind;
@@ -2719,6 +2723,24 @@ private:
         // other channels acquire. Extend the deadline whenever the syncpoint makes progress.
         auto deadline = start + std::chrono::milliseconds{unless_gpu_waits ? 4000 : 15000};
         bool guest_waited = false;
+        // A plain wait that outlives a GPU channel suspended on a semaphore for this long is a
+        // cycle: the GPU waits for a guest write that the thread blocked in this present makes
+        // after it returns (Mario Kart World, 15 s stalls). Give up and present without the fence.
+        constexpr auto suspended_limit = std::chrono::milliseconds{250};
+        std::chrono::steady_clock::time_point suspended_since{};
+        bool gave_up = false;
+        const auto suspended_too_long = [&] {
+            if (!system.GPU().HasSuspendedChannels()) {
+                suspended_since = {};
+                return false;
+            }
+            const auto now = std::chrono::steady_clock::now();
+            if (suspended_since == std::chrono::steady_clock::time_point{}) {
+                suspended_since = now;
+                return false;
+            }
+            return now - suspended_since > suspended_limit;
+        };
         if (VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::PresentGuestWait)) {
             // Sleep this service thread in the guest kernel, as PaceToVblank does: it runs on
             // guest core 3, and a host wait held that core and its game threads for the whole wait.
@@ -2752,6 +2774,10 @@ private:
                                               std::chrono::steady_clock::now() +
                                                   std::chrono::milliseconds{4000});
                     }
+                    if (suspended_too_long()) {
+                        gave_up = true;
+                        break;
+                    }
                 }
                 if (Kernel::GetCurrentThread(kernel)
                         .Sleep(kernel, kernel.HardwareTimer().GetTick() + slice_ns)
@@ -2760,7 +2786,7 @@ private:
                     break;
                 }
             }
-            if (VideoCommon::Nx2Perf::Verify() && !terminated && !fell_back &&
+            if (VideoCommon::Nx2Perf::Verify() && !terminated && !fell_back && !gave_up &&
                 !syncpoints.IsReadyGuest(fence_id, fence_value) && system.IsPoweredOn() &&
                 std::chrono::steady_clock::now() < deadline) {
                 static std::atomic<u64> mismatches{};
@@ -2811,6 +2837,10 @@ private:
                                               std::chrono::steady_clock::now() +
                                                   std::chrono::milliseconds{4000});
                     }
+                    if (suspended_too_long()) {
+                        gave_up = true;
+                        break;
+                    }
                 }
                 wake->cv.wait_for(lk, std::chrono::milliseconds{unless_gpu_waits ? 1 : 50});
             }
@@ -2818,7 +2848,12 @@ private:
         if (unless_gpu_waits && !syncpoints.IsReadyGuest(fence_id, fence_value)) {
             return false;
         }
-        if (!syncpoints.IsReadyGuest(fence_id, fence_value) && m_wait_timeouts++ < 64) {
+        if (gave_up && m_wait_timeouts++ < 64) {
+            LOG_WARNING(Service,
+                        "nx2:vi2 present #{} fence ({}, {}) given up: a GPU channel stayed suspended "
+                        "on a semaphore for 250 ms during the wait (now {})",
+                        m_presents, fence_id, fence_value, syncpoints.GetGuestSyncpointValue(fence_id));
+        } else if (!syncpoints.IsReadyGuest(fence_id, fence_value) && m_wait_timeouts++ < 64) {
             LOG_WARNING(Service, "nx2:vi2 present #{} fence ({}, {}) not reached in 4 s (now {})",
                         m_presents, fence_id, fence_value, syncpoints.GetGuestSyncpointValue(fence_id));
         }
