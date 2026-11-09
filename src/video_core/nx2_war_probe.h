@@ -361,15 +361,11 @@ inline std::string Report(size_t frames, u64 unarmed_changed,
 } // namespace VideoCommon::Nx2Raw
 
 // Nx2Perf run_ahead_snapshot_probe (Nx2Snap at the end of this file): hooks the cow probe calls
-// when it is on, plus the opt-in runtime overlay mode (EDEN_NX2_RUN_AHEAD_OVERLAY=1).
+// when it is on, plus the opt-in runtime overlay mode (run_ahead_overlay / EDEN_NX2_RUN_AHEAD_OVERLAY=1).
 namespace VideoCommon::Nx2Snap {
-/// Opt-in runtime page-snapshot overlay mode (EDEN_NX2_RUN_AHEAD_OVERLAY=1, off by default).
+/// Opt-in runtime page-snapshot overlay mode (run_ahead_overlay / EDEN_NX2_RUN_AHEAD_OVERLAY=1, off by default).
 inline bool OverlayOn() {
-    static const bool on = [] {
-        const char* const env = std::getenv("EDEN_NX2_RUN_AHEAD_OVERLAY");
-        return env != nullptr && std::strcmp(env, "1") == 0;
-    }();
-    return on;
+    return Nx2Perf::On(Nx2Perf::Opt::RunAheadOverlay);
 }
 /// Set once the overlay's pool and tables exist; hot-path read hooks test it first.
 inline std::atomic<bool> g_overlay{false};
@@ -485,8 +481,7 @@ inline bool ProbeOn() {
 }
 
 inline bool On() {
-    static const bool on = ProbeOn() || Nx2Snap::OverlayOn();
-    return on;
+    return ProbeOn() || Nx2Snap::OverlayOn();
 }
 
 /// run_ahead_cover (measurement only, needs the ledger): K-frame unions of the read pages, the
@@ -867,6 +862,18 @@ inline void StartBackThread() {
         Nx2Snap::t_gpu_own = true;
     }
     NoteCowStartBack();
+}
+
+/// BackLoop: keeps g_is_back and g_note in sync with a live flip of run_ahead_overlay.
+inline void SyncBackThread() {
+    if (On()) [[unlikely]] {
+        if (!g_is_back) {
+            StartBackThread();
+        }
+    } else if (g_is_back) [[unlikely]] {
+        g_is_back = false;
+        g_note &= ~static_cast<u8>(NoteLedger | NoteCow);
+    }
 }
 
 inline void NoteSlow(u64 device_addr, u64 size) {
@@ -1723,8 +1730,7 @@ inline bool ProbeOn() {
 }
 
 inline bool On() {
-    static const bool on = ProbeOn() || Nx2Snap::OverlayOn();
-    return on;
+    return ProbeOn() || Nx2Snap::OverlayOn();
 }
 
 /// Set once the probe's state exists; host write hooks test it.
@@ -2017,14 +2023,14 @@ inline void EnsureInit() {
 
 /// Device memory (the GPU's manager) at bind time.
 inline void RegisterDevice(const void* device, DevicePointerFn fn, uintptr_t physical_base) {
-    if (!On()) {
-        return;
-    }
-    EnsureInit();
     State& s = Get();
     s.physical_base.store(physical_base, std::memory_order_relaxed);
     s.device.store(device, std::memory_order_relaxed);
     s.device_pointer.store(fn, std::memory_order_release);
+    if (!On()) {
+        return;
+    }
+    EnsureInit();
 }
 
 inline const u8* DevicePointer(u64 device_addr) {
@@ -3616,8 +3622,7 @@ inline bool ProbeOn() {
 }
 
 inline bool On() {
-    static const bool on = ProbeOn() || OverlayOn();
-    return on;
+    return ProbeOn() || OverlayOn();
 }
 
 // Nx2Perf run_ahead_overlay_budget (measurement only, with the snapshot probe): at the reply, the
@@ -3642,8 +3647,7 @@ inline bool BudgetProbeOn() {
 }
 
 inline bool BudgetOn() {
-    static const bool on = BudgetProbeOn() || OverlayOn();
-    return on;
+    return BudgetProbeOn() || OverlayOn();
 }
 
 inline constexpr u64 PageBits = Nx2Cow::PageBits;
@@ -3936,8 +3940,7 @@ inline bool OwnProbeOn() {
 }
 
 inline bool OwnOn() {
-    static const bool on = OwnProbeOn() || OverlayOn();
-    return on;
+    return OwnProbeOn() || OverlayOn();
 }
 
 enum class OwnClass : u8 { Own, Guest, Unknown };
@@ -5110,6 +5113,11 @@ public:
         const uintptr_t base = cow.physical_base.load(std::memory_order_relaxed);
         const bool probe = ProbeOn();
         const bool budget_probe = BudgetProbeOn();
+        const bool overlay = OverlayOn();
+        g_overlay.store(overlay, std::memory_order_release);
+        if (overlay || OwnProbeOn()) {
+            OwnInit();
+        }
         if (probe && !have_base) {
             window_base = Take();
             epoch_base = window_base;

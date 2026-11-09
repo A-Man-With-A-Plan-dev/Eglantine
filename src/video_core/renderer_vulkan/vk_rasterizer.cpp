@@ -2648,8 +2648,13 @@ void RasterizerVulkan::NoteCameraMotionDraw() {
 
 void RasterizerVulkan::NoteCameraMotionClear() {
     auto& motion = camera_motion;
+    if (!motion.armed || !UsesNvidiaDlss()) {
+        motion.jitter_active = false;
+        motion.jitter_ready = false;
+        return;
+    }
     const auto& regs = maxwell3d->regs;
-    if (!motion.armed || !regs.zeta_enable || regs.zeta.Address() != motion.jitter_depth ||
+    if (!regs.zeta_enable || regs.zeta.Address() != motion.jitter_depth ||
         std::array<u32, 2>{regs.zeta_size.width, regs.zeta_size.height} !=
             motion.jitter_depth_size) {
         return;

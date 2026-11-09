@@ -130,7 +130,9 @@ TEST_CASE("Nx2Perf default mask turns off only the always-off switches", "[nx2_p
                                   i == Index(Opt::RunAheadOwnWriteProbe) ||
                                   i == Index(Opt::BankDirtySkip) ||
                                   i == Index(Opt::BackReplayLean) ||
-                                  i == Index(Opt::FrontMacroCall);
+                                  i == Index(Opt::FrontMacroCall) ||
+                                  i == Index(Opt::SuperMacro) ||
+                                  i == Index(Opt::RunAheadOverlay);
         INFO(opt_names[i]);
         REQUIRE(IsOff(mask, i) == expected_off);
     }
@@ -1066,4 +1068,57 @@ TEST_CASE("geometry_consistency and build_order_priority: on by default and live
     REQUIRE(IsOff(live_safe, Index(Opt::GeometryConsistency)));
     REQUIRE(IsOff(live_safe, Index(Opt::BuildOrderPriority)));
     REQUIRE(IsOff(live_safe, Index(Opt::ReplayDiskRecordings)));
+}
+
+TEST_CASE("rebar_upload, super_macro, run_ahead_overlay, reflex_sleep, vrr_frame_pace, "
+          "dlss_upscale, and shader_build_budget: defaults and live-safe control",
+          "[nx2_perf]") {
+    static_assert(Index(Opt::ShaderBuildBudget) == 91);
+    static_assert(Index(Opt::RebarUpload) == 98);
+    static_assert(Index(Opt::SuperMacro) == 99);
+    static_assert(Index(Opt::RunAheadOverlay) == 100);
+    static_assert(Index(Opt::ReflexSleep) == 101);
+    static_assert(Index(Opt::VrrFramePace) == 102);
+    static_assert(Index(Opt::DlssUpscale) == 103);
+
+    REQUIRE(opt_names[Index(Opt::RebarUpload)] == "rebar_upload");
+    REQUIRE(opt_names[Index(Opt::SuperMacro)] == "super_macro");
+    REQUIRE(opt_names[Index(Opt::RunAheadOverlay)] == "run_ahead_overlay");
+    REQUIRE(opt_names[Index(Opt::ReflexSleep)] == "reflex_sleep");
+    REQUIRE(opt_names[Index(Opt::VrrFramePace)] == "vrr_frame_pace");
+    REQUIRE(opt_names[Index(Opt::DlssUpscale)] == "dlss_upscale");
+
+    // Default-on live switches
+    for (const Opt opt : {Opt::ShaderBuildBudget, Opt::RebarUpload, Opt::ReflexSleep,
+                          Opt::VrrFramePace, Opt::DlssUpscale}) {
+        INFO(opt_names[Index(opt)]);
+        REQUIRE(!IsOff(DefaultOffMask(), Index(opt)));
+        REQUIRE(!IsOff(always_off, Index(opt)));
+        REQUIRE(IsOff(live_safe, Index(opt)));
+    }
+
+    // Opt-in live switches (default off)
+    for (const Opt opt : {Opt::SuperMacro, Opt::RunAheadOverlay}) {
+        INFO(opt_names[Index(opt)]);
+        REQUIRE(IsOff(DefaultOffMask(), Index(opt)));
+        REQUIRE(IsOff(always_off, Index(opt)));
+        REQUIRE(IsOff(live_safe, Index(opt)));
+    }
+
+    const OffMask startup = ParseOffMask(false, "", "", false);
+    const ControlResult flipped = ParseControl(
+        startup,
+        "label test_live\n"
+        "on super_macro,run_ahead_overlay\n"
+        "off rebar_upload,reflex_sleep,vrr_frame_pace,dlss_upscale,shader_build_budget\n",
+        live_safe);
+    REQUIRE(flipped.label == "test_live");
+    REQUIRE(flipped.ignored.empty());
+    REQUIRE(!IsOff(flipped.mask, Index(Opt::SuperMacro)));
+    REQUIRE(!IsOff(flipped.mask, Index(Opt::RunAheadOverlay)));
+    REQUIRE(IsOff(flipped.mask, Index(Opt::RebarUpload)));
+    REQUIRE(IsOff(flipped.mask, Index(Opt::ReflexSleep)));
+    REQUIRE(IsOff(flipped.mask, Index(Opt::VrrFramePace)));
+    REQUIRE(IsOff(flipped.mask, Index(Opt::DlssUpscale)));
+    REQUIRE(IsOff(flipped.mask, Index(Opt::ShaderBuildBudget)));
 }

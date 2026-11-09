@@ -14,6 +14,7 @@
 #include "common/settings.h"
 #include "common/thread.h"
 #include "core/frontend/emu_window.h"
+#include "video_core/nx2_perf.h"
 #ifdef HAS_LSFG
 #include "video_core/renderer_vulkan/present/lsfg_common.h"
 #endif
@@ -426,7 +427,8 @@ void PresentManager::PresentThread(std::stop_token token) {
             // swapchain_mutex. When native Streamline DLSS-G is enabled, bypass software hold so
             // the Streamline hardware flip-metering pacer controls presentation cadence directly.
             Clock::time_point hold_until = now;
-            if (!Streamline::IsDlssGEnabled()) {
+            if (VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::VrrFramePace) &&
+                !Streamline::IsDlssGEnabled()) {
                 if (frame->is_generated) {
                     if (frame->generation_index > 0 && has_pending_generated) {
                         const u32 total_steps = std::max<u32>(1u, frame->generation_count) + 1u;

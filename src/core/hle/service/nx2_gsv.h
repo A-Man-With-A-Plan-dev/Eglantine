@@ -1784,7 +1784,8 @@ private:
         } else if (frames_ahead == -1 && app_program_id == OcarinaOfTimeProgramId) {
             namespace Nx2Perf = VideoCommon::Nx2Perf;
             const bool run_ahead =
-                Nx2Perf::On(Nx2Perf::Opt::FramesAhead) || Nx2Perf::On(Nx2Perf::Opt::InflightWaitV2);
+                Nx2Perf::On(Nx2Perf::Opt::FramesAhead) || Nx2Perf::On(Nx2Perf::Opt::InflightWaitV2) ||
+                VideoCommon::Nx2Snap::OverlayOn();
             frames_ahead = run_ahead ? 1 : 0;
         }
         // run_ahead_ledger (measurement only): compares the last frame's pages and arms the
@@ -1867,11 +1868,17 @@ private:
         m_previous_fence_id = ~w[22];
         m_previous_fence_value = w[24];
         const auto waited = std::chrono::steady_clock::now();
-        // run_ahead_cow_probe (measurement only): the previous reply's epoch ends here.
+        // run_ahead_cow_probe / run_ahead_overlay: the previous reply's epoch ends here.
         const bool cow_probe =
             app_program_id == OcarinaOfTimeProgramId && VideoCommon::Nx2Cow::On();
         if (cow_probe) [[unlikely]] {
             CowClose();
+        } else if (m_cow) [[unlikely]] {
+            CowClose();
+            VideoCommon::Nx2Snap::g_overlay.store(false, std::memory_order_release);
+            if (!VideoCommon::Nx2Snap::OwnProbeOn()) {
+                VideoCommon::Nx2Snap::g_own.store(false, std::memory_order_release);
+            }
         }
         if (Timeline::On()) [[unlikely]] {
             Timeline::guest_wait_entered_ns.store(0, std::memory_order_relaxed);

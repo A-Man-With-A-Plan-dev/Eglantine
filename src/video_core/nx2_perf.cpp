@@ -185,9 +185,33 @@ OffMask InitOffMask() {
         const char* on_list = std::getenv("EDEN_NX2_PERF_ON");
         const char* off_list = std::getenv("EDEN_NX2_PERF_OFF");
         const char* frames_ahead = std::getenv("EDEN_NX2_PERF_FRAMES_AHEAD");
-        const OffMask mask = ParseOffMask(std::getenv("EDEN_NX2_PERF_SAFE") != nullptr,
-                                      on_list ? on_list : "", off_list ? off_list : "",
-                                      frames_ahead && frames_ahead[0] == '0');
+        OffMask mask = ParseOffMask(std::getenv("EDEN_NX2_PERF_SAFE") != nullptr,
+                                    on_list ? on_list : "", off_list ? off_list : "",
+                                    frames_ahead && frames_ahead[0] == '0');
+        if (const char* env = std::getenv("EDEN_NX2_SUPER_MACRO"); env != nullptr) {
+            if (env[0] == '1') {
+                mask &= ~Bit(Opt::SuperMacro);
+            } else if (env[0] == '0') {
+                mask |= Bit(Opt::SuperMacro);
+            }
+        }
+        if (const char* env = std::getenv("EDEN_NX2_RUN_AHEAD_OVERLAY"); env != nullptr) {
+            if (std::string_view{env} == "1") {
+                mask &= ~Bit(Opt::RunAheadOverlay);
+            } else if (std::string_view{env} == "0") {
+                mask |= Bit(Opt::RunAheadOverlay);
+            }
+        }
+        if (const char* env = std::getenv("EDEN_NX2_REBAR_UPLOAD");
+            env != nullptr && std::string_view{env} == "0") {
+            mask |= Bit(Opt::RebarUpload);
+        }
+        if (const char* env = std::getenv("EDEN_NX2_REFLEX_SLEEP"); env != nullptr && *env != '\0') {
+            const std::string_view sv{env};
+            if (sv == "0" || sv == "off" || sv == "false") {
+                mask |= Bit(Opt::ReflexSleep);
+            }
+        }
         std::string state;
         for (size_t i = 0; i < opt_names.size(); ++i) {
             state += fmt::format(" {}={}", opt_names[i], Enabled() && !IsOff(mask, i) ? "on" : "off");

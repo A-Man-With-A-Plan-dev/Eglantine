@@ -288,9 +288,7 @@ private:
 
     void ReleaseThreadFunc(std::stop_token stop_token) {
         Common::SetCurrentThreadName("GPUFencingThread");
-        if (Nx2Snap::OwnOn()) [[unlikely]] {
-            Nx2Snap::t_gpu_own = true; // run_ahead_own_write_probe: fence releases are GPU writes
-        }
+        Nx2Snap::t_gpu_own = true; // run_ahead_own_write_probe / run_ahead_overlay: fence releases are GPU writes
         Common::SetCurrentThreadPriority(Common::ThreadPriority::High);
         Common::SetCurrentThreadToPerformanceCores();
 

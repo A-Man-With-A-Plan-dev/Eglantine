@@ -1174,10 +1174,8 @@ void GpuSplit::ReportLazySkip(const char* where) const {
 void GpuSplit::BackLoop(std::stop_token stop_token) {
     Common::SetCurrentThreadName("GPUBack");
     on_back_thread = true;
+    Nx2Snap::t_gpu_own = true; // run_ahead_own_write_probe / run_ahead_overlay: the back's writes are GPU writes
     Nx2Ledger::StartBackThread();
-    if (Nx2Snap::OwnOn()) [[unlikely]] {
-        Nx2Snap::t_gpu_own = true; // run_ahead_own_write_probe: the back's writes are GPU writes
-    }
     back_running.store(true, std::memory_order_release);
     Common::SetCurrentThreadPriority(Common::ThreadPriority::Critical);
     Common::SetCurrentThreadToPerformanceCores();
@@ -1191,6 +1189,7 @@ void GpuSplit::BackLoop(std::stop_token stop_token) {
     u64 read_position = 0;
     const bool handoff_counters = HandoffCounters();
     while (!stop_token.stop_requested()) {
+        Nx2Ledger::SyncBackThread();
         Nx2Profile::Report("GPU back thread");
         u64 available = published.load(std::memory_order_acquire);
         if (available == read_position) {

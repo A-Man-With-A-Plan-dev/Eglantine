@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "common/common_types.h"
+#include "video_core/nx2_perf.h"
 
 #include "video_core/vulkan_common/vulkan_memory_allocator.h"
 #include "video_core/vulkan_common/vulkan_wrapper.h"
@@ -52,7 +53,7 @@ public:
     }
 
     [[nodiscard]] bool IsRebarEnabled() const noexcept {
-        return use_rebar;
+        return use_rebar && VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::RebarUpload);
     }
 
     void TickFrame();
@@ -72,6 +73,7 @@ private:
         u64 index;
         u64 tick = 0;
         bool deferred{};
+        bool rebar{};
 
         StagingBufferRef Ref() const noexcept {
             return {

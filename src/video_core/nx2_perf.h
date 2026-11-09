@@ -255,6 +255,23 @@ enum class Opt : unsigned {
     /// Async shaders: keep FileEnvironments of graphics pipelines skipped at boot and replay their
     /// translation and compilation on background workers on first skippable use
     ReplayDiskRecordings,
+    /// Vulkan staging buffer pool: place <= 1 MiB upload staging buffers in PCIe ReBAR
+    /// (device-local, host-visible, coherent memory) when a >= 1 GiB ReBAR heap is present
+    RebarUpload,
+    /// Maxwell3D split front: 64-byte (16-word) single-cache-line micro-cache for FrontDmaRead
+    /// within a single macro invocation
+    SuperMacro,
+    /// Run-ahead page snapshot overlay: serve pre-boundary front macro and back reads from the
+    /// reply-time page snapshot pool with GPU-own-write forwarding
+    RunAheadOverlay,
+    /// NVIDIA Streamline Reflex: low-latency mode and per-frame slReflexSleep pacing
+    ReflexSleep,
+    /// Vulkan present thread: fractional VRR multi-frame cadence hold for 2x/3x/4x generated
+    /// frames when hardware flip-metering (DLSS-G) is not active
+    VrrFramePace,
+    /// NVIDIA Streamline DLSS: replace game DLSS / FSR 3.1 and Ocarina of Time post-tonemap
+    /// anti-aliasing with Streamline DLSS Super Resolution / DLAA
+    DlssUpscale,
     Count,
 };
 
@@ -327,6 +344,12 @@ inline constexpr std::array<std::string_view, static_cast<size_t>(Opt::Count)> o
     "geometry_consistency",
     "build_order_priority",
     "replay_disk_recordings",
+    "rebar_upload",
+    "super_macro",
+    "run_ahead_overlay",
+    "reflex_sleep",
+    "vrr_frame_pace",
+    "dlss_upscale",
 };
 
 static_assert(static_cast<size_t>(Opt::Count) <= 128, "the off-mask is 128 bits");
@@ -420,7 +443,9 @@ inline constexpr OffMask DefaultOffMask() {
                           Opt::RunAheadOwnWriteProbe,
                           Opt::BankDirtySkip,
                           Opt::BackReplayLean,
-                          Opt::FrontMacroCall}) {
+                          Opt::FrontMacroCall,
+                          Opt::SuperMacro,
+                          Opt::RunAheadOverlay}) {
         mask |= Bit(opt);
     }
     return mask;
@@ -495,7 +520,9 @@ inline constexpr OffMask always_off = Bit(Opt::SplitOverlap) | Bit(Opt::AcquireE
                                   Bit(Opt::RunAheadOwnWriteProbe) |
                                   Bit(Opt::BankDirtySkip) |
                                   Bit(Opt::BackReplayLean) |
-                                  Bit(Opt::FrontMacroCall);
+                                  Bit(Opt::FrontMacroCall) |
+                                  Bit(Opt::SuperMacro) |
+                                  Bit(Opt::RunAheadOverlay);
 
 static_assert(IsOff(always_off, 33));
 static_assert(static_cast<unsigned>(Opt::PipelineKeepPreloaded) == 44 && !IsOff(always_off, 44) &&
@@ -638,6 +665,24 @@ static_assert(static_cast<unsigned>(Opt::BuildOrderPriority) == 96 &&
 static_assert(static_cast<unsigned>(Opt::ReplayDiskRecordings) == 97 &&
               !IsOff(always_off, static_cast<size_t>(Opt::ReplayDiskRecordings)) &&
               !IsOff(DefaultOffMask(), static_cast<size_t>(Opt::ReplayDiskRecordings)));
+static_assert(static_cast<unsigned>(Opt::RebarUpload) == 98 &&
+              !IsOff(always_off, static_cast<size_t>(Opt::RebarUpload)) &&
+              !IsOff(DefaultOffMask(), static_cast<size_t>(Opt::RebarUpload)));
+static_assert(static_cast<unsigned>(Opt::SuperMacro) == 99 &&
+              IsOff(always_off, static_cast<size_t>(Opt::SuperMacro)) &&
+              IsOff(DefaultOffMask(), static_cast<size_t>(Opt::SuperMacro)));
+static_assert(static_cast<unsigned>(Opt::RunAheadOverlay) == 100 &&
+              IsOff(always_off, static_cast<size_t>(Opt::RunAheadOverlay)) &&
+              IsOff(DefaultOffMask(), static_cast<size_t>(Opt::RunAheadOverlay)));
+static_assert(static_cast<unsigned>(Opt::ReflexSleep) == 101 &&
+              !IsOff(always_off, static_cast<size_t>(Opt::ReflexSleep)) &&
+              !IsOff(DefaultOffMask(), static_cast<size_t>(Opt::ReflexSleep)));
+static_assert(static_cast<unsigned>(Opt::VrrFramePace) == 102 &&
+              !IsOff(always_off, static_cast<size_t>(Opt::VrrFramePace)) &&
+              !IsOff(DefaultOffMask(), static_cast<size_t>(Opt::VrrFramePace)));
+static_assert(static_cast<unsigned>(Opt::DlssUpscale) == 103 &&
+              !IsOff(always_off, static_cast<size_t>(Opt::DlssUpscale)) &&
+              !IsOff(DefaultOffMask(), static_cast<size_t>(Opt::DlssUpscale)));
 
 /// Switches the name front_sync_trio (an alias with no bit of its own) turns on together.
 /// EDEN_NX2_PERF_OFF still turns each of them off.
@@ -702,8 +747,10 @@ inline constexpr OffMask live_safe =
     Bit(Opt::FragmentBarrier) | Bit(Opt::FramesAhead) | Bit(Opt::SortedPageBatches) |
     Bit(Opt::QueryDiagnostics) | Bit(Opt::QueryUploadScratch) | Bit(Opt::FrontRun) |
     Bit(Opt::DownloadBatch) | Bit(Opt::AcquireTriggerEarly) | Bit(Opt::PipelineKeepPreloaded) |
-    Bit(Opt::ComputeRebuildAsync) | Bit(Opt::StaleTargetSkip) | Bit(Opt::GeometryConsistency) |
-    Bit(Opt::BuildOrderPriority) | Bit(Opt::ReplayDiskRecordings);
+    Bit(Opt::ShaderBuildBudget) | Bit(Opt::ComputeRebuildAsync) | Bit(Opt::StaleTargetSkip) |
+    Bit(Opt::GeometryConsistency) | Bit(Opt::BuildOrderPriority) | Bit(Opt::ReplayDiskRecordings) |
+    Bit(Opt::RebarUpload) | Bit(Opt::SuperMacro) | Bit(Opt::RunAheadOverlay) |
+    Bit(Opt::ReflexSleep) | Bit(Opt::VrrFramePace) | Bit(Opt::DlssUpscale);
 
 /// One control file: the whole arm, computed from the startup off-mask.
 struct ControlResult {

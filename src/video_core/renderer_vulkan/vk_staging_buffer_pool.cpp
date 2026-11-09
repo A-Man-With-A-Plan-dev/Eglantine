@@ -240,14 +240,17 @@ StagingBufferRef StagingBufferPool::GetStagingBuffer(size_t size, MemoryUsage us
 std::optional<StagingBufferRef> StagingBufferPool::TryGetReservedBuffer(size_t size,
                                                                         MemoryUsage usage,
                                                                         bool deferred) {
-    StagingBuffers& cache_level = GetCache(usage)[Common::Log2Ceil(size)];
+    const u32 log2_size = Common::Log2Ceil<u32>(static_cast<u32>(size));
+    StagingBuffers& cache_level = GetCache(usage)[log2_size];
     auto& entries = cache_level.entries;
     if (entries.empty()) {
         return std::nullopt;
     }
 
-    const auto is_free = [this](const StagingBuffer& entry) {
-        return !entry.deferred && scheduler.IsFree(entry.tick);
+    const bool want_rebar =
+        IsRebarEnabled() && usage == MemoryUsage::Upload && (1ULL << log2_size) <= 1_MiB;
+    const auto is_free = [this, want_rebar](const StagingBuffer& entry) {
+        return !entry.deferred && entry.rebar == want_rebar && scheduler.IsFree(entry.tick);
     };
 
     if (cache_level.iterate_index >= entries.size()) {
@@ -289,10 +292,9 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
     if (device.IsBufferDeviceAddressSupported()) {
         buffer_ci.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
     }
-    const MemoryUsage alloc_usage =
-        (use_rebar && usage == MemoryUsage::Upload && (1ULL << log2_size) <= 1_MiB)
-            ? MemoryUsage::Stream
-            : usage;
+    const bool want_rebar =
+        IsRebarEnabled() && usage == MemoryUsage::Upload && (1ULL << log2_size) <= 1_MiB;
+    const MemoryUsage alloc_usage = want_rebar ? MemoryUsage::Stream : usage;
     vk::Buffer buffer = memory_allocator.CreateBuffer(buffer_ci, alloc_usage);
     if (device.HasDebuggingToolAttached()) {
         ++buffer_index;
@@ -313,6 +315,7 @@ StagingBufferRef StagingBufferPool::CreateStagingBuffer(size_t size, MemoryUsage
         .index = unique_ids++,
         .tick = deferred ? (std::numeric_limits<u64>::max)() : scheduler.CurrentTick(),
         .deferred = deferred,
+        .rebar = want_rebar,
     });
     staging.iterate_index = 0;
     return entry.Ref();

@@ -46,13 +46,10 @@ constexpr u32 MacroRegistersStart = 0xE00;
 // EDEN_NX2_3D_METHODS: log the first write to each 3D register (finds methods Eden doesn't model).
 static const bool g_trace_first_method_writes = std::getenv("EDEN_NX2_3D_METHODS") != nullptr;
 
-// EDEN_NX2_SUPER_MACRO: opt-in (1 enables the 64-byte macro DMA micro-cache).
+// super_macro (EDEN_NX2_SUPER_MACRO=1 or EDEN_NX2_PERF_ON=super_macro): 64-byte macro DMA
+// micro-cache, live-toggleable via EDEN_NX2_PERF_CONTROL.
 static bool SuperMacroEnabled() {
-    static const bool enabled = [] {
-        const char* env = std::getenv("EDEN_NX2_SUPER_MACRO");
-        return env != nullptr && env[0] == '1';
-    }();
-    return enabled;
+    return VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::SuperMacro);
 }
 
 Maxwell3D::Maxwell3D(MemoryManager& memory_manager_)

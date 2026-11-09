@@ -25,6 +25,7 @@
 #include "common/fs/path_util.h"
 #include "common/logging.h"
 #include "common/settings.h"
+#include "video_core/nx2_perf.h"
 #include "video_core/vulkan_common/streamline_api.h"
 
 #include <sl_security.h>
@@ -72,6 +73,7 @@ struct State {
     bool started{};
     bool attached{};
     bool reflex_available{};
+    bool reflex_mode_active{};
     bool pcl_available{};
     bool dlssg_available{};
     bool dlssg_enabled{};
@@ -641,6 +643,7 @@ bool AttachDevice(VkInstance instance, VkPhysicalDevice physical, VkDevice devic
                     }
                 }
                 state.reflex_available = set_res == sl::Result::eOk;
+                state.reflex_mode_active = state.reflex_available;
                 LOG_INFO(Render_Vulkan,
                          "Streamline Reflex configured: mode={} result={} low_latency_available={} "
                          "pcl_available={}",
@@ -772,7 +775,18 @@ void ReflexSleep(u32 frame_id) {
     if (!state.started || !state.attached || !state.reflex_available || !state.reflex_sleep) {
         return;
     }
-    if (!ReflexSleepWantedByEnv()) {
+    const bool want_sleep =
+        ReflexSleepWantedByEnv() && VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::ReflexSleep);
+    if (state.reflex_set_options && state.reflex_mode_active != want_sleep) [[unlikely]] {
+        sl::ReflexOptions reflex_options{};
+        reflex_options.mode = want_sleep ? (ReflexBoostByEnv() ? sl::ReflexMode::eLowLatencyWithBoost
+                                                               : sl::ReflexMode::eLowLatency)
+                                         : sl::ReflexMode::eOff;
+        reflex_options.frameLimitUs = 0;
+        void(state.reflex_set_options(reflex_options));
+        state.reflex_mode_active = want_sleep;
+    }
+    if (!want_sleep) {
         return;
     }
     sl::FrameToken* const token = GetFrameToken(state, frame_id);
@@ -953,6 +967,7 @@ void Stop() {
     state.started = false;
     state.attached = false;
     state.reflex_available = false;
+    state.reflex_mode_active = false;
     state.pcl_available = false;
     state.dlssg_available = false;
     state.dlssg_enabled = false;
