@@ -18,6 +18,7 @@
 
 #include "common/thread.h"
 #include "video_core/nx2_perf.h"
+#include "video_core/nx2_perf_table.h"
 
 namespace VideoCommon::Nx2Perf {
 namespace {

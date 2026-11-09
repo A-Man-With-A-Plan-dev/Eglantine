@@ -18,6 +18,7 @@
 #include <QVBoxLayout>
 #include <fmt/format.h>
 
+#include "video_core/nx2_perf_table.h"
 #include "yuzu/debugger/nx2_perf_dialog.h"
 
 namespace {

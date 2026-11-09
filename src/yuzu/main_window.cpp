@@ -172,6 +172,7 @@ static FileSys::VirtualFile VfsDirectoryCreateFileWrapper(const FileSys::Virtual
 
 // Video Core //
 #include "video_core/gpu.h"
+#include "video_core/nx2_perf_table.h"
 #include "video_core/renderer_base.h"
 #include "video_core/shader_notify.h"
 

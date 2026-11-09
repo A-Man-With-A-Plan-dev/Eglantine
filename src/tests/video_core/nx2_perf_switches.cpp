@@ -17,6 +17,7 @@
 #include "video_core/nx2_diag.h"
 #include "video_core/nx2_page_hash.h"
 #include "video_core/nx2_perf.h"
+#include "video_core/nx2_perf_table.h"
 
 namespace {
 

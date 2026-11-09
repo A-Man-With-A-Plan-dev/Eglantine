@@ -14,6 +14,7 @@
 
 #include "common/common_types.h"
 #include "video_core/native_qmd.h"
+#include "video_core/nx2_perf_table.h"
 
 namespace {
 

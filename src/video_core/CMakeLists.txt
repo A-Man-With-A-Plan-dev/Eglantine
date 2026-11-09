@@ -123,6 +123,7 @@ add_library(video_core STATIC
     nx2_perf.cpp
     nx2_page_hash.h
     nx2_perf.h
+    nx2_perf_table.h
     nx2_war_probe.h
     ocarina_upscale.h
     present.h

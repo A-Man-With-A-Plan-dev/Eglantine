@@ -25,6 +25,7 @@
 #include "video_core/memory_manager.h"
 #include "video_core/nx2_bank_dirty.h"
 #include "video_core/nx2_perf.h"
+#include "video_core/nx2_perf_table.h"
 #include "video_core/nx2_war_probe.h"
 #include "video_core/renderer_null/null_rasterizer.h"
 
