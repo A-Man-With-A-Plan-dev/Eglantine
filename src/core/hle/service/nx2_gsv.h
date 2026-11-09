@@ -1791,8 +1791,13 @@ private:
         // run_ahead_ledger (measurement only): compares the last frame's pages and arms the
         // back's set swap for this fence, before the wait and outside its timing.
         const bool ledger = VideoCommon::Nx2Ledger::On();
-        if (ledger && frames_ahead == 0) [[unlikely]] {
-            LedgerEnter(~w[22], w[24]);
+        if (ledger) [[unlikely]] {
+            if (!m_ledger) {
+                m_ledger = std::make_unique<VideoCommon::Nx2Ledger::Vi2Window>();
+            }
+            if (frames_ahead == 0) {
+                LedgerEnter(~w[22], w[24]);
+            }
         }
         const auto entered = std::chrono::steady_clock::now();
         // fence_timeline (measurement only): the back's idle total and the last submit at entry.
@@ -2258,10 +2263,12 @@ private:
             m_cow = std::make_unique<Cow::Vi2Window>();
         }
         Cow::Begin(fence_id, fence_value);
-        const auto arm = system.ApplicationMemory().Nx2CowArm();
-        const s64 hash_begin = Cow::NowNs();
-        const u32 hashed = Cow::HashReply();
-        const s64 hash_end = Cow::NowNs();
+        const bool need_cow_arm = Cow::ProbeOn() || VideoCommon::Nx2Snap::ProbeOn();
+        const auto arm = need_cow_arm ? system.ApplicationMemory().Nx2CowArm()
+                                      : Core::Memory::Memory::Nx2CowArmResult{};
+        const s64 hash_begin = need_cow_arm ? Cow::NowNs() : 0;
+        const u32 hashed = need_cow_arm ? Cow::HashReply() : 0;
+        const s64 hash_end = need_cow_arm ? Cow::NowNs() : 0;
         if (VideoCommon::Nx2Raw::On()) [[unlikely]] {
             RawClassifyReply();
         }

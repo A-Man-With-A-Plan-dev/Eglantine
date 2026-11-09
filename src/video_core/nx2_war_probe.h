@@ -845,14 +845,14 @@ inline void AfterHostIncrement(u32 id, u32 value) {
 
 /// BackLoop: the back records its reads from here on (switch on only).
 inline void StartBackThread() {
-    if (!On()) {
-        return;
-    }
     State& state = Get();
-    // Allocated once: a restarted back must not free a set vi2 may still take as published.
+    // Allocated once: a restarted back or live toggle must not see null sets.
     if (!state.sets[0]) {
         state.sets[0] = std::make_unique<PageSet>();
         state.sets[1] = std::make_unique<PageSet>();
+    }
+    if (!On()) {
+        return;
     }
     g_is_back = true;
     g_note |= NoteLedger;
@@ -877,6 +877,10 @@ inline void SyncBackThread() {
 
 inline void NoteSlow(u64 device_addr, u64 size) {
     State& state = Get();
+    if (!state.sets[0]) [[unlikely]] {
+        state.sets[0] = std::make_unique<PageSet>();
+        state.sets[1] = std::make_unique<PageSet>();
+    }
     PageSet& set = *state.sets[state.write_index];
     const u8 category = g_ledger_category;
     const u16 bit = static_cast<u16>(1U << category);
@@ -916,7 +920,13 @@ inline void Note(u64 device_addr, u64 size, NoteKind kind = NoteKind::Sized) {
 /// Back, before it raises syncpoint id's guest value to value: at the armed present fence the
 /// frame's set goes to vi2 and the back records into the other one.
 inline void BeforeBackIncrement(u32 id, u32 value) {
+    if (!g_is_back) [[unlikely]] {
+        SyncBackThread();
+    }
     State& state = Get();
+    if (!state.sets[0]) [[unlikely]] {
+        return;
+    }
     u64 target = state.target.load(std::memory_order_acquire);
     if ((target & ArmedBit) == 0 || ((target >> 32) & 0x7fffffff) != id ||
         static_cast<s32>(value - static_cast<u32>(target)) < 0) {
@@ -5483,6 +5493,18 @@ private:
     /// run_ahead_overlay_budget, vi2 at the reply for gen: host writes from here count for gen+1.
     void BudgetBegin(u32 gen) {
         State& s = Get();
+        if (!budget_phys) {
+            budget_phys = std::make_unique<std::array<u32, TableSlots>>();
+            budget_class = std::make_unique<std::array<u8, TableSlots>>();
+        }
+        if (!s.budget_ready.load(std::memory_order_acquire)) {
+            for (auto& bits : s.host_bits) {
+                if (!bits) {
+                    bits = std::make_unique<std::atomic<u64>[]>(HostBitWords);
+                }
+            }
+            s.budget_ready.store(true, std::memory_order_release);
+        }
         std::atomic<u64>* const next = s.host_bits[(gen + 1) % NumHostBitSets].get();
         for (size_t i = 0; i < HostBitWords; ++i) {
             next[i].store(0, std::memory_order_relaxed);

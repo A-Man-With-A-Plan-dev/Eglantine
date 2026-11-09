@@ -83,12 +83,13 @@ struct Memory::Impl {
             process.IsApplication() && current_page_table->fastmem_arena != nullptr &&
             Settings::values.cpu_backend.GetValue() != Settings::CpuBackend::Nce &&
             current_page_table->GetAddressSpaceBits() <= 43;
+        war_capable_table = war_capable;
         war_inflight = war_capable && VideoCommon::Nx2Inflight::Any();
         cow_on = war_capable && VideoCommon::Nx2Cow::On();
         // run_ahead_cover keeps the arm set to classify pages; it never arms it.
         war_probe = war_capable && (VideoCommon::Nx2WarProbe::On() || war_inflight ||
                                     VideoCommon::Nx2Ledger::CoverOn() || cow_on);
-        if (war_probe) {
+        if (war_capable) {
             war_unprotected.Init();
         }
         if (cow_on) {
@@ -121,7 +122,7 @@ struct Memory::Impl {
         ASSERT_MSG(target >= DramMemoryMap::Base, "Out of bounds target: {:016X}",
                    GetInteger(target));
         std::unique_lock war_lock{war_mutex, std::defer_lock};
-        if ((war_probe || bank_on) && &page_table == current_page_table) [[unlikely]] {
+        if (war_capable_table && &page_table == current_page_table) [[unlikely]] {
             war_lock.lock();
             WarForget(GetInteger(base), size);
         }
@@ -138,7 +139,7 @@ struct Memory::Impl {
         ASSERT_MSG((size & YUZU_PAGEMASK) == 0, "non-page aligned size: {:016X}", size);
         ASSERT_MSG((base & YUZU_PAGEMASK) == 0, "non-page aligned base: {:016X}", GetInteger(base));
         std::unique_lock war_lock{war_mutex, std::defer_lock};
-        if ((war_probe || bank_on) && &page_table == current_page_table) [[unlikely]] {
+        if (war_capable_table && &page_table == current_page_table) [[unlikely]] {
             war_lock.lock();
             WarForget(GetInteger(base), size);
         }
@@ -159,7 +160,7 @@ struct Memory::Impl {
             return;
         }
         std::unique_lock war_lock{war_mutex, std::defer_lock};
-        if ((war_probe || bank_on) && &page_table == current_page_table) [[unlikely]] {
+        if (war_capable_table && &page_table == current_page_table) [[unlikely]] {
             war_lock.lock();
             WarForget(vaddr, size);
         }
@@ -487,7 +488,7 @@ struct Memory::Impl {
             return;
         }
         std::unique_lock war_lock{war_mutex, std::defer_lock};
-        if (war_probe || bank_on) [[unlikely]] {
+        if (war_capable_table) [[unlikely]] {
             war_lock.lock();
             WarForget(vaddr, size);
         }
@@ -551,7 +552,7 @@ struct Memory::Impl {
         // war_guard_probe: arming and trap restores never interleave with the tracker's changes.
         std::unique_lock war_lock{war_mutex, std::defer_lock};
         const u64 war_vaddr = vaddr;
-        if (war_probe || bank_on) [[unlikely]] {
+        if (war_capable_table) [[unlikely]] {
             war_lock.lock();
             if (bank_on && !cached) {
                 // bank_dirty_skip: the tracker is about to give these pages write access.
@@ -1274,7 +1275,7 @@ struct Memory::Impl {
             if (bank) {
                 bank_armed.Erase(page);
             }
-            if (type == Common::PageType::Memory && war_probe) {
+            if (type == Common::PageType::Memory && war_capable_table) {
                 war_unprotected.Insert(page);
                 if (cow_on) {
                     // run_ahead_cow_probe: writable now, armed again at the next reply.
@@ -1541,7 +1542,7 @@ struct Memory::Impl {
     /// them the first time; then the pages given back since and new device mappings).
     Memory::Nx2CowArmResult CowArm(const Memory* owner) {
         Memory::Nx2CowArmResult result{};
-        if (!cow_on) {
+        if (!cow_on || !cow_collect) {
             return result;
         }
         const s64 start = VideoCommon::Nx2Cow::NowNs();
@@ -1653,7 +1654,7 @@ struct Memory::Impl {
     /// run_ahead_snapshot_probe: see Memory::Nx2SnapshotArmSet.
     size_t SnapshotArmSet(std::span<u32> phys_pages, u64& total) {
         total = 0;
-        if (!war_probe) {
+        if (!war_capable_table) {
             return 0;
         }
         std::scoped_lock lk{war_mutex};
@@ -2247,6 +2248,7 @@ struct Memory::Impl {
     std::array<Common::ScratchBuffer<u32>, Core::Hardware::NUM_CPU_CORES> scratch_buffers{};
     std::span<Core::GPUDirtyMemoryManager> gpu_dirty_managers;
     std::mutex sys_core_guard;
+    bool war_capable_table = false;
     bool war_probe = false; ///< war_guard_probe or the inflight epochs, application with fastmem
     bool war_inflight = false; ///< inflight_write_wait / inflight_read_exact can open epochs
     std::mutex war_mutex;
