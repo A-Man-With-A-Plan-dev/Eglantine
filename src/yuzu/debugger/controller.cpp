@@ -116,3 +116,5 @@ void ControllerDialog::ControllerUpdate(Core::HID::ControllerTriggerType type) {
         break;
     }
 }
+
+#include "yuzu/debugger/nx2_perf_dialog.cpp"

@@ -178,6 +178,10 @@ std::string FormatControl(const ControlResult& result, const OffMask& effective_
                        effective_mask.hi, effective_mask.lo);
 }
 
+namespace {
+OffMask g_startup_mask{};
+} // Anonymous namespace
+
 namespace detail {
 
 OffMask InitOffMask() {
@@ -219,6 +223,7 @@ OffMask InitOffMask() {
         LOG_INFO(HW_GPU, "Nx2Perf:{}", state);
         // Stored before the poller starts, so its first store is never overwritten.
         const OffMask live = Enabled() ? mask : all_opts;
+        g_startup_mask = live;
         live_off_mask[1].store(live.hi, std::memory_order_relaxed);
         live_off_mask[0].store(live.lo, std::memory_order_relaxed);
         if (const char* path = std::getenv("EDEN_NX2_PERF_CONTROL"); path && path[0] != '\0') {
@@ -233,6 +238,40 @@ OffMask InitOffMask() {
 }
 
 } // namespace detail
+
+OffMask StartupOffMask() {
+    (void)detail::InitOffMask();
+    return g_startup_mask;
+}
+
+OffMask CurrentOffMask() {
+    return detail::InitOffMask();
+}
+
+void SetOffMask(const OffMask& mask, std::string_view label) {
+    const OffMask startup = StartupOffMask();
+    const OffMask effective = Enabled() ? (mask & all_opts) : all_opts;
+    detail::live_off_mask[1].store(effective.hi, std::memory_order_relaxed);
+    detail::live_off_mask[0].store(effective.lo, std::memory_order_relaxed);
+    const ControlResult result{
+        .mask = effective,
+        .label = std::string{label},
+        .on_vs_startup = startup & ~effective,
+        .off_vs_startup = effective & ~startup,
+        .ignored = {},
+    };
+    LOG_INFO(HW_GPU, "Nx2PerfLive: {}", FormatControl(result, effective));
+}
+
+void Set(Opt opt, bool on, std::string_view label) {
+    OffMask mask = CurrentOffMask();
+    if (on) {
+        mask &= ~Bit(opt);
+    } else {
+        mask |= Bit(opt);
+    }
+    SetOffMask(mask, label);
+}
 
 namespace {
 

@@ -45,28 +45,24 @@ namespace VideoCommon::Nx2Inflight {
 
 /// inflight_wait_v2: both waits, escaping only on a release page or a lack of progress.
 inline bool V2() {
-    static const bool on = Nx2Perf::On(Nx2Perf::Opt::InflightWaitV2);
-    return on;
+    return Nx2Perf::On(Nx2Perf::Opt::InflightWaitV2);
 }
 
 inline bool WriteWait() {
-    static const bool on = (Nx2Perf::On(Nx2Perf::Opt::FramesAhead) &&
-                            Nx2Perf::On(Nx2Perf::Opt::InflightWriteWait)) ||
-                           V2();
-    return on;
+    return (Nx2Perf::On(Nx2Perf::Opt::FramesAhead) &&
+            Nx2Perf::On(Nx2Perf::Opt::InflightWriteWait)) ||
+           V2();
 }
 
 inline bool ReadExact() {
-    static const bool on = (Nx2Perf::On(Nx2Perf::Opt::FramesAhead) &&
-                            Nx2Perf::On(Nx2Perf::Opt::InflightReadExact)) ||
-                           V2();
-    return on;
+    return (Nx2Perf::On(Nx2Perf::Opt::FramesAhead) &&
+            Nx2Perf::On(Nx2Perf::Opt::InflightReadExact)) ||
+           V2();
 }
 
 /// Whether epochs can open at all; false keeps every trap and read path as it was.
 inline bool Any() {
-    static const bool on = WriteWait() || ReadExact();
-    return on;
+    return WriteWait() || ReadExact();
 }
 
 struct Epoch {
@@ -192,8 +188,7 @@ inline std::array<ReadCompare, NumReadCompares>& ReadCompares() {
 namespace VideoCommon::Nx2WarProbe {
 
 inline bool On() {
-    static const bool on = Nx2Perf::On(Nx2Perf::Opt::WarGuardProbe);
-    return on;
+    return Nx2Perf::On(Nx2Perf::Opt::WarGuardProbe);
 }
 
 enum class Category : u32 {

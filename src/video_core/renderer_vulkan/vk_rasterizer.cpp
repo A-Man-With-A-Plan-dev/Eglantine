@@ -599,8 +599,7 @@ u64 DiagShader(const Tegra::Engines::Maxwell3D& maxwell3d, size_t stage) {
 
 // diag_draw_lite (lab diagnostics only): the back's draw bookkeeping without a lock per draw.
 bool DiagLite() {
-    static const bool on = VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::DiagDrawLite);
-    return on;
+    return VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::DiagDrawLite);
 }
 
 // Verify only, back thread: differences found and the error lines left to log.

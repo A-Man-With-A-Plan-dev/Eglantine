@@ -51,6 +51,7 @@ class GRenderWindow;
 class LoadingScreen;
 class OverlayDialog;
 class ControllerDialog;
+class Nx2PerfDialog;
 class QLabel;
 class MultiplayerState;
 class QPushButton;
@@ -462,6 +463,7 @@ private:
     void UpdateVolumeUI();
     void UpdateStatusBar();
     void UpdateGPUAccuracyButton();
+    void UpdateNx2PerfButton();
     void UpdateStatusButtons();
     void UpdateUISettings();
     void UpdateInputDrivers();
@@ -535,6 +537,7 @@ private:
     QLabel* tas_label = nullptr;
     QLabel* firmware_label = nullptr;
     QPushButton* gpu_accuracy_button = nullptr;
+    QPushButton* nx2_perf_button = nullptr;
     QPushButton* renderer_status_button = nullptr;
     QPushButton* refresh_button = nullptr;
     QPushButton* dock_status_button = nullptr;
@@ -575,6 +578,7 @@ private:
 
     // Debugger panes
     ControllerDialog* controller_dialog = nullptr;
+    Nx2PerfDialog* nx2_perf_dialog = nullptr;
 
     QAction* actions_recent_files[max_recent_files_item];
 

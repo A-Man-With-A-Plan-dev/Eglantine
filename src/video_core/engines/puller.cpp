@@ -264,8 +264,8 @@ u32 DrainAndReadWord(DmaPusher& dma_pusher, const Puller::PendingAcquire& acquir
                      VideoCommon::DrainSite site) {
     namespace Nx2Perf = VideoCommon::Nx2Perf;
     // hook_lazy_flush may skip the batch-end submit that the lite wait relies on.
-    static const bool lite = Nx2Perf::On(Nx2Perf::Opt::AcquireDrainLite) &&
-                             !Nx2Perf::On(Nx2Perf::Opt::HookLazyFlush);
+    const bool lite = Nx2Perf::On(Nx2Perf::Opt::AcquireDrainLite) &&
+                      !Nx2Perf::On(Nx2Perf::Opt::HookLazyFlush);
     if (!lite || !VideoCommon::GpuSplit::Get().Active()) {
         DrainBack(site);
         return ReadSemaphoreWord(dma_pusher, acquire.address);

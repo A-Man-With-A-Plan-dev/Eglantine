@@ -1122,3 +1122,23 @@ TEST_CASE("rebar_upload, super_macro, run_ahead_overlay, reflex_sleep, vrr_frame
     REQUIRE(IsOff(flipped.mask, Index(Opt::DlssUpscale)));
     REQUIRE(IsOff(flipped.mask, Index(Opt::ShaderBuildBudget)));
 }
+
+TEST_CASE("Nx2Perf runtime Set and SetOffMask toggle every switch live", "[nx2_perf]") {
+    if (!Enabled()) {
+        return;
+    }
+    const OffMask initial = CurrentOffMask();
+    REQUIRE(StartupOffMask() == initial);
+
+    for (size_t i = 0; i < opt_names.size(); ++i) {
+        const auto opt = static_cast<Opt>(i);
+        const bool was_on = On(opt);
+        Set(opt, !was_on, "test");
+        REQUIRE(On(opt) == !was_on);
+        Set(opt, was_on, "test");
+        REQUIRE(On(opt) == was_on);
+    }
+
+    SetOffMask(initial, "test-restore");
+    REQUIRE(CurrentOffMask() == initial);
+}

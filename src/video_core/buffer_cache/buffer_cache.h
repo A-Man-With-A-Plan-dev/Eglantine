@@ -1678,7 +1678,7 @@ void BufferCache<P>::BindHostGraphicsUniformBuffer(size_t stage, u32 index, u32 
         const bool once_per_frame = bank_mode != '2' && bank_mode != '3' &&
                                     Nx2Perf::On(Nx2Perf::Opt::BankOncePerFrame);
         const bool skip_this_frame = once_per_frame && !Nx2Perf::Verify();
-        static const bool hash_shadow = Nx2Perf::On(Nx2Perf::Opt::BankHashShadow);
+        const bool hash_shadow = Nx2Perf::On(Nx2Perf::Opt::BankHashShadow);
         static const bool dirty_skip = Nx2BankDirty::On();
         const bool seen_this_frame = shadow->last_frame_tick == frame_tick;
         if (Nx2WarProbe::On() && !seen_this_frame) [[unlikely]] {
@@ -3067,8 +3067,7 @@ void BufferCache<P>::ChangeRegister(BufferId buffer_id) {
 
 template <class P>
 bool BufferCache<P>::BindMemoEnabled() {
-    static const bool enabled = !IS_OPENGL && Nx2Perf::On(Nx2Perf::Opt::BindMemo);
-    return enabled;
+    return !IS_OPENGL && Nx2Perf::On(Nx2Perf::Opt::BindMemo);
 }
 
 template <class P>
@@ -3154,8 +3153,7 @@ bool BufferCache<P>::BindMemoHit(const BindMemo& memo, Buffer& buffer, BufferId 
 
 template <class P>
 bool BufferCache<P>::BindMemoLocalEnabled() {
-    static const bool enabled = BindMemoEnabled() && Nx2Perf::On(Nx2Perf::Opt::BindMemoLocal);
-    return enabled;
+    return BindMemoEnabled() && Nx2Perf::On(Nx2Perf::Opt::BindMemoLocal);
 }
 
 template <class P>

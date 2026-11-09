@@ -765,6 +765,15 @@ ControlResult ParseControl(const OffMask& startup_mask, std::string_view text,
 /// "set=<label> on=<names|-> off=<names|-> ignored=<names|-> mask=0x<32 hex, hi then lo>"
 std::string FormatControl(const ControlResult& result, const OffMask& effective_mask);
 
+/// Startup off-mask (after env vars, before any live flips).
+OffMask StartupOffMask();
+/// Current live off-mask in effect right now.
+OffMask CurrentOffMask();
+/// Overwrites the live off-mask in effect for all switches (0..Opt::Count-1) and logs the flip.
+void SetOffMask(const OffMask& mask, std::string_view label = "gui");
+/// Flips a single switch on or off live at runtime and logs the change.
+void Set(Opt opt, bool on, std::string_view label = "gui");
+
 namespace detail {
 /// Off-mask in effect, lo then hi (bit set = off; every switch when EDEN_NX2_PERF_OPT=0); both
 /// words ~0 before the first On(). The live poller stores hi then lo.
@@ -796,15 +805,13 @@ inline bool Verify() {
 /// rises on the fencing thread, after everything recorded before it has landed. Also under
 /// EDEN_NX2_PERF_VERIFY, so vi2 can report presents that return before the previous frame landed.
 inline bool LandedSyncpoints() {
-    static const bool landed = On(Opt::LandedPrevAlways) || On(Opt::OneAheadLanded) ||
-                               On(Opt::GuestLandedSyncpoints) || Verify();
-    return landed;
+    return On(Opt::LandedPrevAlways) || On(Opt::OneAheadLanded) ||
+           On(Opt::GuestLandedSyncpoints) || Verify();
 }
 
 /// guest_landed_syncpoints, outside Verify: the guest value rises with the landed host value.
 inline bool GuestLandedSyncpoints() {
-    static const bool on = On(Opt::GuestLandedSyncpoints) && !Verify();
-    return on;
+    return On(Opt::GuestLandedSyncpoints) && !Verify();
 }
 
 /// guest_landed_syncpoints: counts the fence manager's forced submits (deferred work sent so a
@@ -857,8 +864,7 @@ inline std::atomic<s64> back_idle_since_ns{}; ///< 0 while the back works
 inline std::atomic<s64> guest_wait_entered_ns{}; ///< vi2's fence wait in progress since (0: none)
 
 inline bool On() {
-    static const bool on = Nx2Perf::On(Opt::FenceTimeline);
-    return on;
+    return Nx2Perf::On(Opt::FenceTimeline);
 }
 
 inline s64 NowNs() {

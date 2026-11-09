@@ -30,6 +30,7 @@
 // Other Yuzu stuff //
 #include "debugger/console.h"
 #include "debugger/controller.h"
+#include "debugger/nx2_perf_dialog.h"
 
 #include "about_dialog.h"
 #include "data_dialog.h"
@@ -1198,6 +1199,69 @@ void MainWindow::InitializeWidgets() {
             });
     statusBar()->insertPermanentWidget(0, gpu_accuracy_button);
 
+    // Setup NX2 Live Switches button
+    nx2_perf_button = new QPushButton();
+    nx2_perf_button->setObjectName(QStringLiteral("Nx2PerfStatusBarButton"));
+    nx2_perf_button->setCheckable(true);
+    nx2_perf_button->setFocusPolicy(Qt::NoFocus);
+    nx2_perf_button->setToolTip(
+        tr("Click to toggle NX2 Live Switches window (right-click for presets)"));
+    connect(nx2_perf_button, &QPushButton::clicked, this, [this] {
+        if (!nx2_perf_dialog) {
+            return;
+        }
+        const bool show_dialog = !nx2_perf_dialog->isVisible();
+        nx2_perf_dialog->setVisible(show_dialog);
+        if (show_dialog) {
+            nx2_perf_dialog->raise();
+            nx2_perf_dialog->activateWindow();
+        }
+        UpdateNx2PerfButton();
+    });
+    nx2_perf_button->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(nx2_perf_button, &QPushButton::customContextMenuRequested,
+            [this](const QPoint& menu_location) {
+                QMenu context_menu;
+                context_menu.addAction(tr("Open NX2 Live Switches..."), [this] {
+                    if (nx2_perf_dialog) {
+                        nx2_perf_dialog->show();
+                        nx2_perf_dialog->raise();
+                        nx2_perf_dialog->activateWindow();
+                    }
+                });
+                context_menu.addSeparator();
+                context_menu.addAction(tr("Reset to Startup"), [this] {
+                    VideoCommon::Nx2Perf::SetOffMask(VideoCommon::Nx2Perf::StartupOffMask(),
+                                                     "gui-reset");
+                    if (nx2_perf_dialog) {
+                        nx2_perf_dialog->RefreshState();
+                    }
+                    UpdateNx2PerfButton();
+                });
+                context_menu.addAction(tr("Default (Playtest)"), [this] {
+                    VideoCommon::Nx2Perf::SetOffMask(VideoCommon::Nx2Perf::always_off,
+                                                     "gui-default");
+                    if (nx2_perf_dialog) {
+                        nx2_perf_dialog->RefreshState();
+                    }
+                    UpdateNx2PerfButton();
+                });
+                context_menu.addAction(tr("Safe Mode (EDEN_NX2_PERF_SAFE)"), [this] {
+                    VideoCommon::Nx2Perf::SetOffMask(VideoCommon::Nx2Perf::StartupOffMask() |
+                                                         VideoCommon::Nx2Perf::DefaultOffMask() |
+                                                         VideoCommon::Nx2Perf::always_off,
+                                                     "gui-safe");
+                    if (nx2_perf_dialog) {
+                        nx2_perf_dialog->RefreshState();
+                    }
+                    UpdateNx2PerfButton();
+                });
+                context_menu.exec(nx2_perf_button->mapToGlobal(menu_location));
+                nx2_perf_button->repaint();
+            });
+    UpdateNx2PerfButton();
+    statusBar()->insertPermanentWidget(0, nx2_perf_button);
+
     // Setup Renderer API button
     renderer_status_button = new QPushButton();
     renderer_status_button->setObjectName(QStringLiteral("RendererStatusBarButton"));
@@ -1248,6 +1312,11 @@ void MainWindow::InitializeDebugWidgets() {
     controller_dialog = new ControllerDialog(QtCommon::system->HIDCore(), input_subsystem, this);
     controller_dialog->hide();
     debug_menu->addAction(controller_dialog->toggleViewAction());
+
+    nx2_perf_dialog = new Nx2PerfDialog(this);
+    nx2_perf_dialog->hide();
+    nx2_perf_dialog->SetChangeCallback([this] { UpdateNx2PerfButton(); });
+    debug_menu->addAction(nx2_perf_dialog->toggleViewAction());
 }
 
 void MainWindow::InitializeRecentFileMenuActions() {
@@ -4720,6 +4789,7 @@ void MainWindow::UpdateStatusBar() {
     game_fps_label->setVisible(true);
     emu_frametime_label->setVisible(true);
     firmware_label->setVisible(false);
+    UpdateNx2PerfButton();
 }
 
 void MainWindow::UpdateGPUAccuracyButton() {
@@ -4728,6 +4798,25 @@ void MainWindow::UpdateGPUAccuracyButton() {
         ConfigurationShared::gpu_accuracy_texts_map.find(gpu_accuracy)->second;
     gpu_accuracy_button->setText(gpu_accuracy_text.toUpper());
     gpu_accuracy_button->setChecked(gpu_accuracy != Settings::GpuAccuracy::Low);
+}
+
+void MainWindow::UpdateNx2PerfButton() {
+    if (!nx2_perf_button) {
+        return;
+    }
+    namespace Nx2Perf = VideoCommon::Nx2Perf;
+    const Nx2Perf::OffMask current = Nx2Perf::CurrentOffMask();
+    const Nx2Perf::OffMask startup = Nx2Perf::StartupOffMask();
+    size_t on_count = 0;
+    for (size_t i = 0; i < Nx2Perf::opt_names.size(); ++i) {
+        if (!Nx2Perf::IsOff(current, i)) {
+            ++on_count;
+        }
+    }
+    nx2_perf_button->setText(
+        QStringLiteral("NX2 %1/%2").arg(on_count).arg(Nx2Perf::opt_names.size()));
+    nx2_perf_button->setChecked(current != startup ||
+                                (nx2_perf_dialog && nx2_perf_dialog->isVisible()));
 }
 
 void MainWindow::UpdateDockedButton() {
@@ -4795,6 +4884,7 @@ void MainWindow::UpdateStatusButtons() {
                                        Settings::RendererBackend::Vulkan);
     UpdateAPIText();
     UpdateGPUAccuracyButton();
+    UpdateNx2PerfButton();
     UpdateDockedButton();
     UpdateFilterText();
     UpdateAAText();

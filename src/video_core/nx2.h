@@ -751,8 +751,7 @@ namespace Nx2PendingWake {
 enum Reason : u32 { ByPush = 1, ByLatch = 2 };
 
 inline bool On() {
-    static const bool on = VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::PendingWake);
-    return on;
+    return VideoCommon::Nx2Perf::On(VideoCommon::Nx2Perf::Opt::PendingWake);
 }
 
 inline Common::Event wake_event;
