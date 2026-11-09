@@ -396,11 +396,7 @@ const u8* MemoryManager::GetPointer(GPUVAddr gpu_addr) const {
         return {};
     }
     VideoCommon::Nx2Cow::SetSite(NX2_RETURN_ADDRESS());
-    const u8* const ptr = memory.GetPointer<u8>(*address);
-    if (ptr != nullptr && VideoCommon::Nx2Snap::OverlayActive()) [[unlikely]] {
-        return VideoCommon::Nx2Snap::OverlayPointer(*address, ptr);
-    }
-    return ptr;
+    return memory.GetPointer<u8>(*address);
 }
 
 #if defined(_MSC_VER) && !defined(__clang__) // no need for gcc / clang but msvc's compiler is more conservative with inlining.
@@ -548,7 +544,12 @@ void MemoryManager::ReadBlockUnsafe(GPUVAddr gpu_src_addr, void* dest_buffer, co
         VideoCommon::Nx2Cow::SkipNextPointer();
         if (const u8* const pointer = GetPointer(gpu_src_addr)) {
             if (VideoCommon::Nx2Ledger::g_note != 0) [[unlikely]] {
-                VideoCommon::Nx2Ledger::Note(*GpuToCpuAddress(gpu_src_addr), size);
+                const DAddr dev_addr = *GpuToCpuAddress(gpu_src_addr);
+                VideoCommon::Nx2Ledger::Note(dev_addr, size);
+                if (VideoCommon::Nx2Snap::OverlayActive() &&
+                    VideoCommon::Nx2Snap::TryReadOverlay(dev_addr, pointer, dest_buffer, size)) {
+                    return;
+                }
             }
             std::memcpy(dest_buffer, pointer, size);
             return;

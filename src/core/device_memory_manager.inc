@@ -457,14 +457,7 @@ u8* DeviceMemoryManager<Traits>::GetSpan(const DAddr src_addr, const std::size_t
     if ((static_cast<size_t>(tracked_entries[page_index].continuity_tracker+1) << page_bits) >= size + subbits) {
         VideoCommon::Nx2Ledger::Note(src_addr, size, VideoCommon::Nx2Ledger::NoteKind::Span);
         VideoCommon::Nx2Cow::SkipNextPointer();
-        u8* const ptr = GetPointer<u8>(src_addr);
-        if (ptr != nullptr && VideoCommon::Nx2Snap::OverlayActive()) [[unlikely]] {
-            if (size + subbits <= page_size) {
-                return const_cast<u8*>(VideoCommon::Nx2Snap::OverlayPointer(src_addr, ptr));
-            }
-            return nullptr;
-        }
-        return ptr;
+        return GetPointer<u8>(src_addr);
     }
     return nullptr;
 }
@@ -476,14 +469,7 @@ const u8* DeviceMemoryManager<Traits>::GetSpan(const DAddr src_addr, const std::
     if ((static_cast<size_t>(tracked_entries[page_index].continuity_tracker+1) << page_bits) >= size + subbits) {
         VideoCommon::Nx2Ledger::Note(src_addr, size, VideoCommon::Nx2Ledger::NoteKind::Span);
         VideoCommon::Nx2Cow::SkipNextPointer();
-        const u8* const ptr = GetPointer<u8>(src_addr);
-        if (ptr != nullptr && VideoCommon::Nx2Snap::OverlayActive()) [[unlikely]] {
-            if (size + subbits <= page_size) {
-                return VideoCommon::Nx2Snap::OverlayPointer(src_addr, ptr);
-            }
-            return nullptr;
-        }
-        return ptr;
+        return GetPointer<u8>(src_addr);
     }
     return nullptr;
 }

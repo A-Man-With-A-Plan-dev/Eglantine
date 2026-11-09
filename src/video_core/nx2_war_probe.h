@@ -4452,11 +4452,15 @@ inline bool OverlayActive(u32& out_gen) {
     if (gen == 0 || s.tables[gen & 1]->gen.load(std::memory_order_acquire) != gen) {
         return false;
     }
-    if (Nx2Cow::t_role != Nx2Cow::Role::None) {
+    if (Nx2Cow::t_role == Nx2Cow::Role::Back) {
         if (!Nx2Cow::BeforeBoundary(gen)) {
             return false;
         }
-    } else if (Nx2Cow::Passed(Nx2Cow::Role::Back)) {
+    } else if (Nx2Cow::t_role == Nx2Cow::Role::Front && t_front_macro) {
+        if (!Nx2Cow::BeforeBoundary(gen)) {
+            return false;
+        }
+    } else {
         return false;
     }
     out_gen = gen;
@@ -5170,7 +5174,7 @@ public:
             }
         }
         const u32 union_pages = t.used_count;
-        if (probe || OverlayOn()) {
+        if (probe) {
             for (size_t i = 0; i < arm_count; ++i) {
                 t.Insert((*arm)[i], FromArmSet);
             }
